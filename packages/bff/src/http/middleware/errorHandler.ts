@@ -107,6 +107,7 @@ const FRAMEWORK_CLIENT_ERRORS: ReadonlyMap<
       code: 'PAYLOAD_TOO_LARGE',
       message: 'Request contains too many parameters.'
     },
+    // HUMAN-RATIFIED 2026-08-09 as 400 VALIDATION_ERROR (reconciliation item 13).
     'querystring.parse.rangeError': {
       status: 400,
       code: 'VALIDATION_ERROR',
@@ -174,8 +175,13 @@ const UNKNOWN_REQUEST_ID = 'unknown';
  * JSON-safe and header-safe by construction, so the body can be built by plain string
  * concatenation with NO serialization, escaping, or `String()` coercion — the operations that
  * could themselves throw. Anything else degrades to the constant.
+ *
+ * EXPORTED as the single definition of this shape so the drift guard in
+ * `tests/unit/correlationId.test.ts` can assert the real generator's output against THIS pattern
+ * rather than a second copy of it. The coupling to `correlationId.ts`'s generator degrades
+ * silently (every fallback `requestId` becomes `"unknown"`), so it is asserted, not commented.
  */
-const PREVALIDATED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+export const PREVALIDATED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
  * Reads the correlation id and returns it ONLY if it is a pre-validated UUID string.
