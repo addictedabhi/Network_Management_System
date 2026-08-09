@@ -1,0 +1,32 @@
+[Unit]
+Description=NMS LibreNMS syslog-ng sidecar (syslog on 1514/udp - FR-56a POC exception)
+After=nms-network.service nms-db.service nms-librenms.service
+Requires=nms-network.service nms-db.service
+
+[Container]
+ContainerName=nms-syslogng
+Image=docker.io/librenms/librenms:25.7.0
+Network=nms.network
+# 1514 NOT 514: rootless cannot bind <1024. FR-56a scoped exception (approved).
+PublishPort=1514:514/udp
+Volume=nms-librenms-data:/data:Z
+EnvironmentFile=%h/nms/.env
+Environment=TZ=UTC
+Environment=PUID=1000
+Environment=PGID=1000
+Environment=SIDECAR_SYSLOGNG=1
+Environment=DB_HOST=nms-db
+Environment=DB_NAME=librenms
+Environment=DB_USER=librenms
+Environment=DB_TIMEOUT=60
+Environment=REDIS_HOST=nms-redis
+Environment=REDIS_PORT=6379
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

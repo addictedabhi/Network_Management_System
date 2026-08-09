@@ -3,6 +3,7 @@ Credentials.md
 .env
 .env.*
 !.env.example
+!.env.keycloak.example
 
 # Dependencies / build
 node_modules/

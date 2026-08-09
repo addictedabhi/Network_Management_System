@@ -26,11 +26,11 @@ Note: repo is greenfield (README + architecture reference + requirement doc only
 Run from repo root. **VERIFIED 2026-08-09** against the real scaffold (branch `feature/nms-1-nms-platform-foundation`):
 - Install (deterministic): `npm ci` — **verified: yes**
 - Full build: `npm run build` — **verified: yes**
-- Full test run (never skip tests for verification): `npm test` — **verified: yes** (23 tests, 0 failures)
-- Workspace dep guard: `npm run lint:deps` — **verified: yes**. This is the structural NFR-09/AC-F#31 control; it previously failed OPEN on a missing/malformed manifest. Any edit to `scripts/check-workspace-deps.mjs` is security-relevant — re-probe it with a real negative case, don't trust exit 0.
+- Full test run: `npm test` — **verified: yes** — **276 tests, 0 failures, 0 skipped, 0 todo** (177 vitest = **168 bff + 9 shared**; plus **99 `node:test`**) at `24f0d19`. One command covers everything (guard folded in via `test:deps`). Number history: 222 (wrong) → 231 → 244 → 258 → 273 → 276. Quote the breakdown, never a bare total.
+- Workspace dep guard: `npm run lint:deps` — **verified: yes**. Now an **AST parse**, not regex. Jarvis re-probed 11 cases at `ed82337`: 9 violation forms exit 1, 2 import-like-text cases correctly exit 0. Still security-relevant (NFR-09/AC-F#31): after ANY change to `scripts/check-workspace-deps.mjs`, re-probe with real negative cases — including a violation OUTSIDE `src/`, a dynamic `import()`, and an import-like string that must NOT false-positive.
 - Type check: `npm run typecheck` — **verified: yes**, command is **`tsc -b`** (NOT `--noEmit`; TS6310 with composite refs)
-- Lint: `npm run lint` — **exits 0 but is a NO-OP today** (no workspace defines `lint`; ESLint not scaffolded). Do NOT cite it as a passing lint gate.
-- Local run: `npm run dev` (UI :3000, BFF :4000); `npm run sim` (:9001)
+- Lint: `npm run lint` — runs workspace `lint` scripts (`--if-present`) **and** `lint:deps`, so `lint:deps` genuinely runs. **ESLint is still NOT scaffolded**, so no JS/TS style/correctness linting happens — treat it as a dependency-rule gate only, never a full lint gate.
+- Local run: `npm run dev` works (aliases `dev:bff`, BFF :4000); needs a valid env or fail-fast config correctly refuses to start. `npm run sim` awaits Task 12.
 
 ## Style & conventions
 - TypeScript strict mode; no `any` in production code.

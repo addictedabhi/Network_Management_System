@@ -1,10 +1,28 @@
 # 0003. Authentication and session design (BFF-mediated OIDC with server-side session)
 
-- **Status:** Proposed (awaiting human approval at G2). **Contains an assumption requiring human confirmation — see OQ-2.** **AMENDED 2026-08-09 by ADR 0008 Decision 3 — see the note below.**
+- **Status:** Proposed (awaiting human approval at G2). **Contains an assumption requiring human confirmation — see OQ-2.** **AMENDED 2026-08-09 by ADR 0008 Decision 3 — see the note below.** **AMENDED 2026-08-09 (F-5) — SSO activation/cutover design added; see the F-5 amendment below.**
 - **Date:** 2026-08-09
 - **Deciders:** Human (approver), Technical Architect (author)
 - **Work item:** `nms-platform-foundation`
 - **Relates to:** FR-10..19, FR-40, FR-42, NFR-11..14, NFR-17, AC-A#1..8, OQ-2, OQ-5, OQ-7, OQ-10
+
+> ## F-5 amendment (2026-08-09) — SSO is configured fail-closed but NOT activated; activation design + controlled cutover
+>
+> **Deployment state (measured):** `auth_mechanism` is still `mysql`. `~/nms/config/config.php` already carries `sso.static_level=0`, `sso.mode=header`, `sso.trusted_proxies=["10.89.0.52"]`, and a group→level map — but the mechanism was deliberately not switched and **no Keycloak realm/OIDC client was registered** (Keycloak is on the default `master` realm only). Flipping `auth_mechanism` blind would lock everyone out, including recovery paths. The nginx header-injection strip (FR-58 check 9b) passes **independently** of SSO state and is unchanged. Evidence: `task-0.2-0.6-deployment-evidence.md` (F-5).
+>
+> **This amendment does not change the auth *design* below — it specifies its *activation*.** The BFF flow, opaque Redis session, token validation, role map, and fail-closed rule all stand. What F-5 adds is the realm/client design and a controlled cutover with a break-glass fallback so a misconfiguration cannot lock out all access. Full detail: `docs/design/nms-platform-foundation-deployment-findings.md` §F-5.
+>
+> **1. Dedicated realm.** Create a **`nms` realm** (NOT `master` — `master` is Keycloak's own admin realm; app clients/groups there couple app identity to Keycloak administration). It holds the four groups and both OIDC clients. A later corporate-IdP swap stays a config change (issuer/client/group-claim), not a redesign — ADR 0003 is IdP-agnostic.
+>
+> **2. Two clients.** `nms-custom-ui` (confidential, the BFF, Auth-Code+PKCE, `redirect_uri` MUST carry `:8443` and match exactly — registered now, flow not exercised until Task 10). `nms-native` (confidential, the `oauth2-proxy` in front of the LibreNMS native UI — the actual OIDC client, secret runtime-injected, header-strip on, `/api/` exempt from interactive redirect).
+>
+> **3. Group→level map (reconciled with OQ-7):** `nms-admin`→10; `nms-engineer`→10|1 (OQ-7 pending); `nms-operator`→1; `nms-readonly`→5|1 (ADR 0008 Decision 3 / OQ-7: `5` global-read fits read-only-with-full-visibility better than `1`, pending human); **no match → `static_level=0` → NO access** (fail-closed; never the arch-ref `default_level=1` mistake). `sso.create_users`/`update_users=true` (FR-16); level re-evaluated each login (AC-A#5). The two pending cells (`10|1`, `5|1`) are the ONLY items still needing the human (OQ-7).
+>
+> **4. Exact config.php cutover line** (the `sso.*` keys are NOT in `config_definitions.json`, so they live in `config.php`, not `lnms config:set`): flip `$config['auth_mechanism'] = 'sso';` (currently `'mysql'`) **LAST**, only after the sequence below passes. `oauth2-proxy` env (server-side `.env`, never committed): `OIDC_ISSUER_URL=https://10.121.77.206:8443/auth/realms/nms`, client `nms-native`, runtime secret.
+>
+> **5. Controlled cutover with break-glass:** (1) create a **local `mysql`-mechanism admin** (break-glass) BEFORE touching `auth_mechanism`; (2) register realm + clients + groups; (3) **verify isolation FIRST** (plan Task 0.5 Step 3 — datastores/LibreNMS have no direct host listener; `sso` on a directly-reachable LibreNMS is an auth bypass — the only boundary on 0.4c); (4) stand up the proxy as OIDC client; (5) **dry-run `auth_test.php` while still on `mysql`** to confirm each group resolves to its level and unmapped→0; (6) **flip `auth_mechanism=sso`** last; (7) verify login/auto-provision/unmapped-denied/logout-re-prompt AND break-glass still works; (8) **rollback = revert to `mysql` and reload** — always available because of step 1, one reversible step (load-bearing on this snapshot-waived host). `sso.auth_logout_handler` → proxy sign-out URL is the only reason AC-A#7 can pass (LibreNMS cannot itself log out an SSO user).
+>
+> **No privileged operation is required** — all of this is `config.php` edits, `lnms`/`podman exec`, and Keycloak realm admin, within the rootless/no-sudo envelope.
 
 ## Context
 
@@ -62,13 +80,13 @@ A user whose claims match no mapped group is **denied access entirely** (fail-cl
 
 > **AMENDMENT (2026-08-09, ADR 0008 Decision 3) — a premise above was wrong.** The paragraph as originally written implies LibreNMS can be configured as an OIDC client through `config.php`. The official LibreNMS authentication documentation (retrieved 2026-08-09) lists the available modules as `mysql`, `active_directory`, `ldap`, `radius`, `http-auth`, and `sso` — **there is no OIDC module**, and only one may be enabled at a time. The `sso` mechanism is a **header / environment-variable** mechanism intended for a relying party sitting in front of LibreNMS.
 >
-> **The corrected design:** `auth_mechanism = sso` behind an **OIDC-authenticating reverse proxy**, which is the actual OIDC client and holds the runtime-injected client secret. Everything else in this ADR stands unchanged — the BFF's own flow, the opaque Redis session, token validation, the role map, and the fail-closed rule (which maps onto `sso.static_level = 0`). Two consequences worth carrying forward: (1) **two** OIDC clients are needed, not one — `nms-custom-ui` for the BFF plus one for the proxy; (2) the docs state LibreNMS "has no capability to log out a user authenticated via Single Sign-On", so `sso.auth_logout_handler` must point at the proxy's sign-out URL or **AC-A#7 silently fails**. See design §12.4 for the security controls this makes mandatory. OQ-7 should also reconsider level `5` (`global-read`) for the `readonly` role.
+> **The corrected design:** `auth_mechanism = sso` behind an **OIDC-authenticating reverse proxy**, which is the actual OIDC client and holds the runtime-injected client secret. Everything else in this ADR stands unchanged — the BFF's own flow, the opaque Redis session, token validation, the role map, and the fail-closed rule (which maps onto `sso.static_level = 0`). Two consequences worth carrying forward: (1) **two** OIDC clients are needed, not one — `nms-custom-ui` for the BFF plus one for the proxy; (2) the docs state LibreNMS "has no capability to log out a user authenticated via Single Sign-On", so `sso.auth_logout_handler` must point at the proxy's sign-out URL or **AC-A#7 silently fails**. See design §12.4 for the security controls this makes mandatory. OQ-7 should also reconsider level `5` (`global-read`) for the `readonly` role. **[F-5 amendment at top operationalises this: dedicated `nms` realm, both clients registered, and the controlled cutover with break-glass.]**
 
 ## Assumptions requiring human confirmation at G2
 
-- **OQ-2 (BLOCKING for implementation, not for this design):** this ADR assumes an OIDC-compliant IdP exists with admin access to register two clients (`nms-custom-ui` confidential, `nms-native` confidential) and to define the four groups above, and that it exposes standard discovery (`/.well-known/openid-configuration`), JWKS, and an `end_session_endpoint`. The design is IdP-agnostic and depends on no Keycloak-specific feature. **If no IdP exists, standing one up is a prerequisite task and Phase 1 cannot complete** — the estimate in the design doc flags this.
+- **OQ-2 (BLOCKING for implementation, not for this design):** this ADR assumes an OIDC-compliant IdP exists with admin access to register two clients (`nms-custom-ui` confidential, `nms-native` confidential) and to define the four groups above, and that it exposes standard discovery (`/.well-known/openid-configuration`), JWKS, and an `end_session_endpoint`. The design is IdP-agnostic and depends on no Keycloak-specific feature. **If no IdP exists, standing one up is a prerequisite task and Phase 1 cannot complete** — the estimate in the design doc flags this. **[F-5: Keycloak is deployed but on `master` only; the `nms` realm + clients are the outstanding activation work.]**
 - **OQ-5:** assumed that RP-initiated logout at the IdP plus destruction of the platform session is sufficient, and that the LibreNMS PHP session is additionally terminated by hitting LibreNMS's own logout. AC-A#7 requires re-authentication at *both* UIs, so this must be verified rather than assumed correct.
-- **OQ-7:** the role/level table above, particularly `nms-engineer`'s native-UI access.
+- **OQ-7:** the role/level table above, particularly `nms-engineer`'s native-UI access **and the `readonly` `5`-vs-`1` refinement — these are the only two cells the F-5 cutover leaves pending the human.**
 - **OQ-10:** proposed 30-minute idle timeout and 8-hour absolute session lifetime (FR-19), both configuration values.
 
 ## Consequences

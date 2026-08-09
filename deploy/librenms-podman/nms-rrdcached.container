@@ -1,0 +1,27 @@
+[Unit]
+Description=NMS RRDCached (>=1.5.5 required by LibreNMS)
+After=nms-network.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-rrdcached
+Image=docker.io/crazymax/rrdcached:1.8.0
+Network=nms.network
+# NOT published
+# SELinux :z (SHARED) - this tree has THREE consumers: rrdcached, librenms, dispatcher.
+# :Z would apply a private label and break the other two with permission-denied errors.
+Volume=%h/nms/rrd:/data/db:z
+Volume=%h/nms/rrd-journal:/data/journal:z
+Environment=LOG_LEVEL=LOG_INFO
+Environment=WRITE_TIMEOUT=1800
+Environment=WRITE_JITTER=1800
+Environment=WRITE_THREADS=4
+Environment=FLUSH_DEAD_DATA_INTERVAL=3600
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

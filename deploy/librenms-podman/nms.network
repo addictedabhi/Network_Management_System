@@ -1,0 +1,9 @@
+[Unit]
+Description=NMS POC dedicated Podman network (nms-platform-foundation)
+
+[Network]
+NetworkName=nms
+Driver=bridge
+
+[Install]
+WantedBy=default.target

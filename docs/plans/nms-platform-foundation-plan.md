@@ -21,6 +21,22 @@
 > **Two things did NOT transfer to the agent, and both are load-bearing:**
 > 1. **The pre-flight VM snapshot** — taken by the **human on the hypervisor/cloud console**. An agent inside the guest cannot snapshot the machine it is running on. **Deployment does not begin without a recorded snapshot ID.**
 > 2. **Any destructive, irreversible, or pre-existing-service-affecting action** — STOP and confirm with the human.
+>
+> **Revision 4 (2026-08-09) — Task 0.1 EXECUTED, it raised three STOPs, and the human's resolution created a THIRD install branch.** Task 0.1's reconnaissance is complete (evidence: `.claude/team/artifacts/nms-platform-foundation/deployment/task-0.1-facts.md`) and returned **STOP**: the host is a **shared, domain-joined host with ~39 days uptime carrying a third party's Kafka/ZooKeeper estate plus two Python services owned by our own login account**; there is **no usable non-interactive sudo**; and **Docker and Compose are both absent** (Podman 5.6.0 is present).
+>
+> The human chose **option 3: proceed on this host with a minimal-footprint, rootless-Podman POC deployment, no sudo, with explicit consent to co-tenancy.** That fits **neither 0.4a (Docker Compose) nor 0.4b (native)**, so this revision adds **Task 0.4c** and makes it **the selected branch for this host**. 0.4a and 0.4b are **retained unchanged** as the documented paths for a future privileged or dedicated host — they are not dead, they are simply not selected here.
+>
+> **What this revision changes:** adds **Task 0.4c**; rewrites the **branch selector** (below); reconciles **Tasks 0.5 and 0.6** to unprivileged ports, `~/nms` paths, and SELinux labelling; adds a **POC limitations** section; and records a **requirement-level conflict on FR-56** that is routed to the human rather than silently resolved. **Tasks 0.2, 0.3 and 1–13 keep their numbers.** Task 0.2's Compose manifest becomes a **0.4a/0.4b-only artifact**; 0.4c's equivalent is authored inside Task 0.4c.
+
+### Branch selection — DECIDED for `10.121.77.206` (revision 4)
+
+| Branch | Method | Status for THIS host | Why |
+|---|---|---|---|
+| **0.4a** | Official Docker Compose | **NOT SELECTED — impossible here** | Docker absent, Compose v1 and v2 absent. Installing a container runtime is a system-wide change needing sudo we do not have, on a shared host. Retained for a future dedicated host |
+| **0.4b** | Official native install | **NOT SELECTED — rejected here** | Needs sudo throughout (`useradd`, writes under `/opt`, package installs, PHP-FPM, MariaDB, snmpd, systemd *system* units). No usable sudo, and on this shared host it is the highest-blast-radius option available. Retained for a future dedicated host |
+| **0.4c** | **Rootless Podman** | **SELECTED** | Podman **5.6.0 is already installed**, runs entirely unprivileged, confines all state to `~/nms`, and installs nothing system-wide. It is the only branch executable under the discovered facts |
+
+**The decision is forced by discovered fact, not by preference.** ADR 0008 revision 2 still holds that Compose is the better *method* in the abstract; ADR 0008 **revision 3** records why it is unavailable here and what we give up. Anything in Tasks 0.2/0.3 that says "the selected branch is 0.4a" is superseded by this table.
 
 ### Credential hygiene — read this before Task 0.1 (Critical)
 
@@ -533,47 +549,361 @@ This branch is not yet "repeatable" in FR-55's sense. Record in `docs/design/lib
 
 ---
 
+## Task 0.4c: Install via rootless Podman — **[DEVELOPER AGENT EXECUTES via SSH]** — **THE SELECTED BRANCH for `10.121.77.206`**
+
+**Why this branch exists.** Task 0.1 discovered Docker absent, Compose absent, no usable sudo, and a shared host running a third party's production Kafka/ZooKeeper estate. The human resolved the resulting STOP with **option 3**: proceed here anyway, rootless, minimal-footprint, no sudo, with explicit consent to co-tenancy. This task is that install. It is a **POC deployment on borrowed ground**, and every step below is written to make that literal rather than aspirational.
+
+**Files:**
+- Create: `.claude/team/artifacts/nms-platform-foundation/deployment/task-0.4c-podman-install.md` (evidence)
+- Create: `deploy/librenms-podman/` in THIS repo — the quadlet unit set, `.env.example`, a `containers.conf` fragment, and `README.md`. Authoring these executes nothing; they are copied to the host in Step 6.
+
+**Interfaces:**
+- Consumes: Task 0.1's discovered facts (Podman 5.6.0, CentOS Stream 9, SELinux Enforcing, 35 GB free on `/`, occupied ports).
+- Produces: a running LibreNMS stack owned entirely by the deploying account under `~/nms`, reachable on **8080/8443**, with traps on **1162/udp** and syslog on **1514/udp**.
+
+### Non-negotiable ground rules for this whole task
+
+These are not advisory. Each maps to a human-specified constraint, and violating any of them is an ABORT, not a judgement call.
+
+| Rule | Concretely |
+|---|---|
+| **Nothing system-wide** | No `sudo`, no `dnf`, no writes under `/etc`, no system systemd unit, no SELinux policy change, no sysctl. Every artifact lives under `$HOME`. |
+| **Storage only under `~/nms`** | **Never `/opt/airlinq`** — that is the third party's 149 GB application volume and it holds their Kafka data. Our tree is `~/nms/` and nothing else. |
+| **Zero modification of anything pre-existing** | Do not edit, move, restart, or "tidy" any existing file, process, cron entry, or service. |
+| **Off-limits entirely** | **Kafka (9092), ZooKeeper (2181), port 8077 (`cli/serve.py`), port 5000 (`local_rag`), Samba (139/445/137/138), CUPS (631), the JVM ephemerals (33793/46527).** Do not bind them, probe them destructively, or reconfigure them. |
+| **Append-only for the two shared files we may touch** | `~/.ssh/authorized_keys` (Step 2) and, only if unavoidable, `~/.config/containers/containers.conf` (Step 5). Both **append-only, with a comment identifying the block as ours.** The existing `@reboot` crontab entry for `stc-cmp-wisdom` is **never touched** — see Step 9. |
+| **Unprivileged ports only** | 8080/tcp, 8443/tcp, 1162/udp, 1514/udp. Rootless Podman **cannot** bind below 1024 — official `rootless.md`: *"Podman can not create containers that bind to ports < 1024"* — and every documented workaround (kernel firewall rule, `redir`, lowering `net.ipv4.ip_unprivileged_port_start`) requires root we do not have. |
+
+### Standing aborts — check at EVERY step, and write the verdict into the evidence file
+
+1. **Anything requires `sudo`** → **STOP**, report to Jarvis. Do not attempt it, and never pipe the SSH password into it.
+2. **Any sign of interference with an existing workload** — a colliding port bind, a Kafka/ZooKeeper state change, a service restart we did not cause, an OOM event, load average climbing sharply → **ABORT immediately**, tear down what we started (Step 11), report.
+3. **Disk on `/` above 80%** → **STOP**. Baseline is 29% used / 35 GB free. `df -h /` is checked before and after every image pull and before the stack starts.
+
+- [ ] **Step 1: Re-confirm preconditions — four gates, all mandatory**
+
+Expected, all four:
+1. **Snapshot ID recorded** by the human for `10.121.77.206`. Task 0.1 Step 1 recorded this as **OUTSTANDING**. **If it is still outstanding: STOP.** On a shared host running someone else's production Kafka this is the only rollback covering a mistake we did not anticipate, and it matters *more* here than on the other branches, not less: "rootless" bounds our blast radius by design but does not eliminate it.
+2. **The human's option-3 consent is recorded** (plan revision 4 + ADR 0008 revision 3).
+3. **Key auth working** (Step 2 establishes it).
+4. **The branch selector reads 0.4c.**
+
+- [ ] **Step 2: Install the project SSH key — append-only, commented**
+
+Task 0.1 Step 6 deliberately held this back pending consent. Consent is now given, so it proceeds — with the append-only discipline it was always specified to have.
+
+```bash
+# The public key is not a secret. The private key NEVER enters the repo.
+# The comment line identifies the block as ours, so the account's owner can
+# see what we added and remove it together with the key in one operation.
+{ echo "# nms-platform-foundation deploy key (added 2026-08-09 by NMS project; safe to remove with this line)";
+  cat "$HOME/.ssh/nms_deploy_ed25519.pub"; } \
+  | ssh <user>@10.121.77.206 'umask 077; mkdir -p ~/.ssh && cat >> ~/.ssh/authorized_keys'
+```
+
+Expected: exit 0. Before running it, record the existing line count. Then verify **without** the password and confirm nothing was clobbered:
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 -o PasswordAuthentication=no -o BatchMode=yes <user>@10.121.77.206 \
+  'echo key-auth-ok; wc -l < ~/.ssh/authorized_keys'
+```
+
+Expected: `key-auth-ok`, and a line count **exactly 2 greater** than the pre-existing count (our comment + our key). **If the count suggests anything was replaced: STOP** — that means `>>` was typed as `>` and another party's access may have been removed, which is the most damaging accident available in this task.
+
+**After this step, stop using the password.** `Credentials.md` is not read again.
+
+- [ ] **Step 3: Re-verify the host facts this branch depends on — cheap, and they may have drifted**
+
+Task 0.1's facts are hours old on a host we do not control. Re-check, read-only, the ones that would invalidate the plan:
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'set -e
+echo "== PODMAN"; podman version --format "{{.Client.Version}}"; podman info --format "{{.Host.Security.Rootless}} {{.Store.GraphDriverName}}"
+echo "== DISK"; df -h / | tail -1
+echo "== PORTS-WE-WANT"; ss -tulpn 2>/dev/null | grep -E ":(8080|8443|1162|1514)\b" || echo "all four free"
+echo "== PORTS-OFFLIMITS-ALIVE"; ss -tulpn 2>/dev/null | grep -cE ":(9092|2181|8077|5000)\b"
+echo "== SELINUX"; getenforce
+echo "== SUBIDS"; grep "^$(id -un):" /etc/subuid /etc/subgid || echo "NO-SUBIDS"
+'
+```
+
+Expected:
+- `5.6.0`, rootless `true`, graph driver **`overlay`**.
+- Disk **at or below 80%** used. Above → **STOP** (standing abort 3).
+- **`all four free`** for 8080/8443/1162/1514. Any occupant → **STOP**; do not pick a different port unilaterally — an unexpected occupant means the host changed under us, and the human chose these ports.
+- The off-limits count is **4** (all still running). Below 4 means something we were told not to touch has stopped → **ABORT and report**: we must neither be the plausible cause of a third-party outage nor proceed into an unstable host.
+- `Enforcing`.
+- **`/etc/subuid` and `/etc/subgid` contain a range for our user.** This is the one fact Task 0.1 did **not** capture, and rootless Podman **cannot function without it** — user namespaces need a sub-UID/GID allocation. `NO-SUBIDS` → **STOP**: populating those files needs root, so it is a sudo requirement in disguise. Podman 5.6.0 merely being installed is *not* evidence the range exists; verify, do not infer.
+
+- [ ] **Step 4: Author the quadlet unit set in this repo — nothing executes**
+
+Rootless quadlet files live in **`~/.config/containers/systemd/`**, a per-user path needing no privilege. Official `podman-systemd.unit(5)`: *"Quadlet files for non-root users can be placed in the following directories: `$XDG_RUNTIME_DIR/containers/systemd/`, `$XDG_CONFIG_HOME/containers/systemd/` or `~/.config/containers/systemd/`"*. We author them here, version-controlled, which satisfies FR-55's repeatability the same way the Compose file would have.
+
+Create under `deploy/librenms-podman/`:
+
+| File | Purpose |
+|---|---|
+| `nms.network` | One dedicated Podman network named `nms` → generates `nms-network.service`. Isolates our containers from everything else on the host |
+| `nms-db.container` | MariaDB — **not published**, reachable only on the `nms` network |
+| `nms-redis.container` | Redis — **not published** |
+| `nms-rrdcached.container` | RRDCached ≥1.5.5 — **not published** |
+| `nms-timescaledb.container` | TimescaleDB — **not published** |
+| `nms-librenms.container` | LibreNMS web/PHP-FPM — **not published**; the proxy reaches it over the `nms` network |
+| `nms-dispatcher.container` | `SIDECAR_DISPATCHER=1` |
+| `nms-snmptrapd.container` | `SIDECAR_SNMPTRAPD=1`, `PublishPort=1162:162/udp` |
+| `nms-syslogng.container` | `SIDECAR_SYSLOGNG=1`, `PublishPort=1514:514/udp` |
+| `nms-proxy.container` | TLS + OIDC authenticating proxy. `PublishPort=8080:8080` and `PublishPort=8443:8443` — the only two published TCP ports |
+| `nms-keycloak.container`, `nms-kcdb.container` | Per the Keycloak verdict — see Step 12 |
+| `.env.example` | Placeholders only |
+| `README.md` | Pinned versions, the port table, the retention policy, and the teardown procedure |
+
+**Naming rule:** every container, network, volume, and unit is prefixed **`nms-`** / `nms`. Task 0.1 found no `nms*` anything on the host, so the prefix cannot collide with Kafka, ZooKeeper, `local_rag`, `stc-cmp-wisdom`, or Samba. Record that collision check in the evidence.
+
+Four authoring rules that are correctness requirements, not style:
+
+1. **Pin every image.** No `latest`, exactly as 0.4a required. Verify: `grep -rn "Image=.*:latest" deploy/librenms-podman/` → **no output**.
+2. **Publish only 8080, 8443, 1162/udp, 1514/udp.** Verify: `grep -rn "^PublishPort=" deploy/librenms-podman/` returns **exactly four lines**, none naming a host-side port below 1024.
+3. **SELinux labels — the `:z` vs `:Z` distinction is load-bearing and a literal reading of the constraint would break the stack.** Per `podman-run(1)`: `:Z` labels content with a **private unshared** label — *"Only the current container can use a private volume"* — while `:z` applies a **shared** label letting multiple containers read/write. The **RRD tree is mounted by `librenms`, `dispatcher`, AND `rrdcached`** — three containers. Labelling it `:Z` would break the stack, and it would present as confusing permission-denied errors rather than an obvious misconfiguration. Therefore:
+   - **`:z` (shared)** on the RRD tree and any other bind mount with more than one consumer.
+   - **`:Z` (private)** on single-consumer bind mounts (MariaDB data, TimescaleDB data, Keycloak DB data).
+   - Record the label chosen per mount, **with its consumer count**, in `README.md`.
+   - **No `chcon`, no `semanage`, no policy change.** `:z`/`:Z` relabelling is performed by Podman as our own user on our own files under `$HOME`, which needs no privilege.
+   - *Alternative considered, not selected:* place every container in one `.pod`. The doc notes all containers in a pod share a single SELinux label, which makes `:Z` safe even for shared mounts. Rejected because a shared pod also shares one network namespace and therefore one port space, coupling the sidecars more tightly than this topology wants and making the "exactly four published ports" check harder to reason about. Revisit if per-mount labelling proves fiddly in practice.
+   - **The amendment handoff says "`:Z` labels"; this step implements that intent correctly rather than literally.** The deviation is recorded here and in ADR 0008 revision 3.
+4. **Ownership inside the container.** Rootless containers map our UID into a namespace, so a bind mount we create can appear as `nobody` to a container process running as a service user. Where an image needs a specific UID (MariaDB, Postgres), use `UserNS=keep-id:uid=<n>,gid=<n>` — the pattern the official `podman-run(1)` examples use for exactly this case (`--userns=keep-id:uid=999,gid=999 -v ~/data:/var/lib/mysql:Z`). **Do not** reach for `idmap`: the doc states it *"is only supported by Podman in rootful mode. The Linux kernel does not allow the use of idmapped file systems for unprivileged users."* Prefer **named Podman volumes** over bind mounts for database data — they live under `~/.local/share/containers/` and sidestep both the labelling and the ownership problem. Use bind mounts only where a human must read the files directly (config, RRD inspection).
+
+- [ ] **Step 5: Fix the source-IP problem BEFORE starting anything — the step most likely to be skipped, and it would break FR-58 silently**
+
+**The finding, from Podman's official networking documentation:** rootless bridge networks default to the `rootlessport` forwarder, which is *"a userspace proxy that **does not preserve client source IPs**"*. The same doc gives the fix: *"To preserve source IPs, set `rootless_port_forwarder="pasta"` in the `[network]` section of `containers.conf`."*
+
+**Why this is not a detail.** LibreNMS attributes an incoming **trap** or **syslog** message to a device **by its source IP**. With the default forwarder every trap and syslog line arrives appearing to originate from the container network's gateway. The messages are received, the ports are open, `ss` looks perfectly correct — and LibreNMS files them against no device. Task 0.6's trap/syslog check would fail with nothing anywhere explaining why, and the natural (wrong) conclusion would be that the simulators or the network are at fault.
+
+```bash
+# APPEND-ONLY to a per-user file. If ~/.config/containers/containers.conf does not
+# exist we create it (creating a file of ours is not modifying an existing one).
+# If it DOES exist we append with our comment markers and NEVER rewrite an existing
+# key -- a conflicting rootless_port_forwarder already present is a STOP.
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'set -e
+f=~/.config/containers/containers.conf
+mkdir -p ~/.config/containers
+if [ -f "$f" ] && grep -q "rootless_port_forwarder" "$f"; then
+  echo "PRE-EXISTING KEY - STOP"; grep -n "rootless_port_forwarder" "$f"; exit 3
+fi
+printf "\n# --- added by NMS platform-foundation POC 2026-08-09; remove this block to revert ---\n[network]\nrootless_port_forwarder=\"pasta\"\n# --- end NMS block ---\n" >> "$f"
+podman info --format "{{.Host.RootlessNetworkCmd}}"
+'
+```
+
+Expected: exit 0, and the `[network]` block appended between our comment markers. `PRE-EXISTING KEY - STOP` (exit 3) → **STOP and report**: overwriting an existing container setting on a shared account is precisely the modification we promised not to make.
+
+**Verify this empirically in Step 10 — do not trust the config alone.** A configuration key that is set but ineffective is the same defect class as a no-op lint script: it reports success while proving nothing.
+
+- [ ] **Step 6: Create the tree and copy the units — `~/nms` only**
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'set -e
+umask 077
+mkdir -p ~/nms/config ~/nms/rrd ~/nms/logs ~/nms/backup ~/.config/containers/systemd
+chmod 700 ~/nms
+df -h / | tail -1'
+scp -i ~/.ssh/nms_deploy_ed25519 -r deploy/librenms-podman/* <user>@10.121.77.206:~/nms/
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 \
+  'cp ~/nms/*.container ~/nms/*.network ~/.config/containers/systemd/ && ls -1 ~/.config/containers/systemd/'
+```
+
+Expected: `~/nms` exists at mode `700`; the unit files are listed; disk still ≤80%. **Nothing is written outside `$HOME`.** Confirm explicitly in evidence with `find ~/nms -maxdepth 1` and an assertion that no path under `/opt/airlinq` was written.
+
+- [ ] **Step 7: Create the real `.env` on the server — secrets generated there, never printed**
+
+Identical discipline to 0.4a Step 3: generate in place, prove only the shape.
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'set -e
+cd ~/nms; [ -f .env ] || cp .env.example .env; chmod 600 .env
+for k in MYSQL_PASSWORD MYSQL_ROOT_PASSWORD TIMESCALE_PASSWORD KEYCLOAK_ADMIN_PASSWORD SNMP_COMMUNITY; do
+  v=$(openssl rand -base64 30 | tr -d "=+/" | cut -c1-32)
+  sed -i "s|^${k}=.*|${k}=${v}|" .env
+done
+awk -F= "/^[A-Z_]+=/ {print \$1\"=<set:\"length(\$2)\">\"}" .env'
+```
+
+Expected: every key prints as `KEY=<set:NN>` with `NN` > 0. Evidence records **only** that masked listing. Never `cat .env`.
+
+- [ ] **Step 8: Pull the pinned images — with a disk check on both sides**
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'set -e
+df -h / | tail -1
+grep -h "^Image=" ~/.config/containers/systemd/*.container | cut -d= -f2 | sort -u | while read -r i; do
+  echo "== $i"; podman pull "$i"; done
+df -h / | tail -1
+podman images --format "{{.Repository}}:{{.Tag}} {{.Size}}"
+podman system df'
+```
+
+Expected: every image pulls; disk **still ≤80%** afterwards. Images land in `~/.local/share/containers/storage` — inside our home, on `/`, which is exactly why the before/after `df` matters. **Stop if** the post-pull figure crosses 80%: the LibreNMS + MariaDB + TimescaleDB + Keycloak image set is several GB and 35 GB is a budget, not a comfort.
+
+- [ ] **Step 9: Enable lingering and start the stack — the startup-method decision, with its evidence**
+
+**Decision: systemd `--user` + quadlet, with lingering enabled for our own account.** This is the human's preferred option and it **is** available without privilege. The evidence, from the upstream systemd polkit policy (`src/login/org.freedesktop.login1.policy`):
+
+- `org.freedesktop.login1.`**`set-self-linger`** → `allow_any=yes`, `allow_active=yes`, `allow_inactive=yes` — **no authentication required to enable lingering for your own user.**
+- `org.freedesktop.login1.set-user-linger` (lingering for *another* user) → `auth_admin_keep`. We never invoke that form.
+
+`loginctl enable-linger` **with no username argument** takes the self path. Task 0.1's evidence corroborates that a user manager already exists for our UID (`user@2002` is a running unit), consistent with `--user` units being usable here. Lingering is what makes them survive **logout** and start at **boot** — `loginctl(1)`: *"a user manager is spawned for the user at boot and kept around after logouts. This allows users who are not logged in to run long-running services."*
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'set -e
+loginctl enable-linger                       # SELF form only - never "enable-linger <user>"
+loginctl show-user "$(id -un)" --property=Linger
+systemctl --user daemon-reload
+systemctl --user start nms-db nms-redis nms-rrdcached nms-timescaledb
+sleep 30
+systemctl --user start nms-librenms nms-dispatcher nms-snmptrapd nms-syslogng nms-proxy
+sleep 20
+systemctl --user list-units "nms-*" --no-pager
+podman ps --format "{{.Names}} {{.Status}} {{.Ports}}"'
+```
+
+Expected: `Linger=yes`; every `nms-*` unit **active**; `podman ps` shows all containers `Up`, with the **only** published ports being `8080`, `8443`, `1162/udp`, `1514/udp`.
+
+**Stop conditions — the sharp edge of this step:**
+- `enable-linger` **fails or prompts for authentication** → the host's polkit has been locally overridden away from the upstream default. **STOP.** Do **not** use `sudo`. Use Step 9-ALT only with Jarvis's confirmation, because it changes the persistence guarantee.
+- Any unit in a restart loop after two checks → **STOP**.
+- A port bind failure → **STOP** (standing abort 2): something now occupies a port Step 3 found free.
+
+**Step 9-ALT — the documented fallback, if and only if lingering is unavailable.** Do **not** add a `@reboot` crontab line. The account's crontab already contains the third party's `@reboot /opt/airlinq/aqaillm/stc-cmp-wisdom/scripts/start_server.sh`, and `crontab` offers no atomic append — the only idiom is read-modify-write of the *entire* table, which puts someone else's boot-critical line one truncated write away from loss. The human's constraint is explicit that existing crontab entries are never modified, and the cheapest way to honour that absolutely is **not to write the crontab at all**. Instead: run the stack under the user manager **without** lingering, accepting that it **does not survive logout or reboot**, and restart it manually via a documented one-liner (`systemctl --user start nms-db nms-redis ...`) after any reboot. **Record this as an explicit POC limitation** and report it — a POC that needs a human to restart it after a reboot is acceptable only if everyone knows that is the arrangement.
+
+- [ ] **Step 10: Verify what actually matters, not merely that containers are up**
+
+Four checks. The third is the one that would otherwise fail invisibly in Task 0.6.
+
+```bash
+# (1) LibreNMS's own validator
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 \
+  'podman exec --user librenms nms-librenms php validate.php'
+```
+Expected: **no `[FAIL]`** lines. Warnings about optional components are acceptable and are recorded. Any FAIL → **STOP**; do not build on a broken base.
+
+```bash
+# (2) RRDCached >=1.5.5, then pin rrdtool_version exactly as the official doc requires
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 \
+  'podman exec nms-rrdcached rrdcached -h 2>&1 | head -2
+   podman exec --user librenms nms-librenms lnms config:set rrdtool_version "<exact-version>"'
+```
+Expected: version **≥1.5.5**, no permission errors. A permission error here is usually the `:z`/`:Z` mistake from Step 4 rule 3 — check the RRD mount's label before anything else. Below 1.5.5 → **STOP** (a shared filesystem then becomes mandatory, which is an infrastructure decision, not a config tweak).
+
+```bash
+# (3) SOURCE-IP PRESERVATION -- the Step 5 fix, PROVEN rather than assumed.
+# Send a syslog line from a DIFFERENT host on the network, then read what arrived.
+logger -n 10.121.77.206 -P 1514 -d "nms-srcip-probe-$(date +%s)"
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 \
+  'podman logs --tail 40 nms-syslogng | grep nms-srcip-probe'
+```
+Expected: the received line carries the **real source IP of the sending machine**, not a container gateway address (typically `10.88.0.1` or a `10.0.2.x` pasta address). **If a gateway IP appears, the `pasta` forwarder is not in effect — STOP** and fix it before Task 0.6, because every trap and syslog attribution downstream depends on this one property.
+
+```bash
+# (4) Nothing of ours leaked onto a port we do not own; the off-limits set is untouched
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 \
+  'ss -tulpn | grep -E ":(8080|8443|1162|1514|3306|5432|6379|8000)\b"
+   ss -tulpn | grep -cE ":(9092|2181|8077|5000)\b"'
+```
+Expected: **only** 8080/8443/1162/1514 bound by us; **3306, 5432, 6379 and 8000 NOT bound** on any host interface (internal network only — a published database port is a defect: fix the unit, do not accept it); off-limits count still **4**.
+
+- [ ] **Step 11: Prove teardown works — before we depend on the stack, not after**
+
+The VM snapshot is the human's rollback. **Ours** must be verified while it is still cheap to fix:
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'set -e
+systemctl --user stop nms-proxy nms-syslogng nms-snmptrapd nms-dispatcher nms-librenms
+podman ps --format "{{.Names}}" | grep -c "^nms-" || echo 0
+systemctl --user start nms-librenms nms-dispatcher nms-snmptrapd nms-syslogng nms-proxy'
+```
+
+Expected: our containers stop and restart cleanly, and the off-limits count stays **4** throughout.
+
+Record in `README.md` the **complete removal** procedure: stop the units → `rm ~/.config/containers/systemd/nms-*` → `systemctl --user daemon-reload` → remove our containers, volumes and network → remove our images → `rm -rf ~/nms` → delete our commented block from `containers.conf` → delete our two lines from `authorized_keys` → `loginctl disable-linger`. **That list is the co-tenancy promise made concrete:** an operator must be able to return this account to its prior state without guessing which artifacts were ours. Everything carries the `nms-` prefix precisely so that list is enumerable rather than archaeological.
+
+- [ ] **Step 12: Keycloak — the floor check passes, but read the co-tenancy note**
+
+ADR 0008 Decision 4's floor is **4 vCPU / 8 GB**. Discovered: **32 vCPU / 62 GiB total, 48 GiB available**. The floor is **cleared by roughly 8× on both axes** — verdict recorded in ADR 0008 revision 3. Proceed with the `nms-keycloak` and `nms-kcdb` units.
+
+**The binding constraint here is disk and neighbours, not CPU or RAM.** Keycloak's marginal cost is roughly +2 vCPU / +2 GB / +5–10 GB disk. CPU and RAM are abundant; **disk is the scarce resource (35 GB)**, and we share a machine its owners did not size for us. Bring Keycloak up **after** Step 10 passes, re-run `df -h /`, and **stop if it crosses 80%**.
+
+- [ ] **Step 13: Write evidence and report to Jarvis**
+
+Per-step expected-vs-actual, PASS/FAIL/STOP, the masked `.env` listing, the source-IP probe result verbatim, the before/after `df` figures, the off-limits-count check at each step, and **the startup method actually achieved** (lingering vs Step 9-ALT). **Do not proceed to Task 0.5 with any step failed.**
+
+---
+
 ## Task 0.5: TLS, firewall, and SSO wiring — **[DEVELOPER AGENT EXECUTES via SSH]**
+
+> ### Revision 4 reconciliation — READ THIS BEFORE ANY STEP BELOW (branch 0.4c)
+>
+> This task was written for branches 0.4a/0.4b, where we held root and could bind privileged ports. **On the selected 0.4c branch the following substitutions apply to every step in this task**, and where a step becomes impossible it is marked so explicitly rather than left to be discovered mid-run.
+>
+> | Written as | On 0.4c becomes | Why |
+> |---|---|---|
+> | `https://10.121.77.206/` (443) | **`https://10.121.77.206:8443/`** | Rootless cannot bind <1024 |
+> | HTTP on 80 | **8080** | Same. ACME HTTP-01 is therefore **not possible** — it requires inbound 80 |
+> | Traps on **162/udp** | **1162/udp** | Same |
+> | Syslog on **514/udp** | **1514/udp** | Same |
+> | `~/nms-deploy` | **`~/nms`** | Human-specified path |
+> | `docker compose exec -T <svc>` | **`podman exec nms-<svc>`** | No Compose on this host |
+> | `docker compose logs <svc>` | **`podman logs nms-<svc>`** | Same |
+> | `sudo ufw` / `firewall-cmd` | **NOT AVAILABLE — see Step 2 below** | No sudo; `firewalld` is inactive and we must not enable it |
+> | `LIBRENMS_BASE_URL=https://10.121.77.206` | **`LIBRENMS_BASE_URL=https://10.121.77.206:8443`** | The port is now part of the URL, and **every** consumer must carry it |
+>
+> **`LIBRENMS_BASE_URL` — the change that reaches furthest.** It is no longer a bare host URL. Every place it appears (the BFF's `.env`, `.env.example`, design §2/§12, the OIDC `redirect_uri` registered at Keycloak, the proxy's own external URL, and any curl example in this plan) must carry **`:8443`**. A mismatch between the registered `redirect_uri` and the actual URL is the single most common OIDC failure, and it presents as a login loop rather than as a configuration error.
 
 Applies to both branches. This task contains the deployment's **highest-severity security property** (design §12.4) — and under revision 3 it is constructed without a human reading each command first, which raises the stakes on Step 3's negative test rather than lowering them.
 
 **Stop conditions for this whole task:** any firewall change that would drop the **SSH session you are working through** (lock-out risk — see Step 2); any change to a firewall rule that pre-existed our work; any modification to an existing web-server vhost; enabling `sso` before Step 3's isolation check passes.
 
-- [ ] **Step 1: Terminate TLS and confirm HTTPS**
+- [ ] **Step 1: Terminate TLS on 8443 and confirm HTTPS**
 
-Install the certificate from the source recorded at Task 0.1 Step 7 and configure the proxy.
+Install the certificate from the source recorded at Task 0.1 Step 7 and configure the proxy. **On 0.4c the listener is 8443, not 443.**
 
 ```bash
-curl -sI https://10.121.77.206/ | head -3
-openssl s_client -connect 10.121.77.206:443 -servername <host> </dev/null 2>/dev/null | openssl x509 -noout -dates -subject
+curl -skI https://10.121.77.206:8443/ | head -3
+openssl s_client -connect 10.121.77.206:8443 -servername <host> </dev/null 2>/dev/null | openssl x509 -noout -dates -subject
 ```
-Expected: `HTTP/… 200` (or a 302 to the IdP once Step 4 is done), and a certificate whose subject matches the host name and whose dates are current. The official install docs explicitly do **not** cover HTTPS and warn the install is "not secure by default" — this step is where that is fixed.
+Expected: `HTTP/… 200` (or a 302 to the IdP once Step 4 is done), and a certificate whose subject matches the host name with current dates. The official install docs explicitly do **not** cover HTTPS and warn the install is "not secure by default" — this step is where that is fixed.
 
 **Stop if** no certificate source has been supplied and a self-signed CA has not been explicitly approved. Do not silently generate a self-signed cert and call FR-58 satisfied — that shifts a trust decision onto the BFF host without anyone deciding it.
 
-- [ ] **Step 2: Apply the firewall rules from design §12.6, default-deny — SSH-safety first**
+**0.4c note — ACME is off the table.** Let's Encrypt HTTP-01 needs inbound **port 80**, which we cannot bind. Combined with Task 0.1's finding that this is an RFC1918 address on a corporate network with no public DNS, the realistic options are a **corporate CA** or a **POC self-signed CA**. If self-signed, the BFF host must be configured to trust it — a real step, and the commonest cause of a Task 6 failure that presents as a code bug. **This is a human decision and it is still outstanding.**
 
-Allow only: 443/TCP inbound; **22/TCP inbound from the admin origin (add this rule FIRST)**; 162/UDP and 514/UDP inbound from the device/simulator ranges; 161/UDP + ICMP outbound; 443/TCP outbound. Everything else denied.
+- [ ] **Step 2: Firewall — NOT APPLICABLE on 0.4c. Read this step; do not execute it.**
+
+**This step cannot be performed and must not be attempted.** Every form of it needs root: `ufw`/`firewall-cmd` require sudo, and Task 0.1 found **`firewalld` inactive** on the host. Enabling or configuring a host firewall would (a) need sudo — **standing abort 1**, and (b) risk cutting network paths belonging to Kafka, ZooKeeper, Samba, and two Python services — **standing abort 2**. Enabling a default-deny firewall on a shared host whose other tenants' required ports we do not know is one of the most reliable ways to cause someone else's outage.
+
+**What replaces it, and it is weaker — say so plainly:**
+
+| Control | 0.4a/0.4b (with root) | 0.4c (rootless) |
+|---|---|---|
+| Restrict who can reach the UI | Host firewall, source-restricted | **None.** 8443 is reachable from anywhere that can route to the host |
+| Restrict trap/syslog sources | Host firewall, source-restricted | **None** at the network layer; LibreNMS-side device filtering only |
+| Keep MariaDB / Redis / TimescaleDB / LibreNMS unreachable | Firewall **plus** not publishing the port | **Not publishing the port** — the container network is the only boundary |
+
+**The single control that still works is the one that matters most, and it is now load-bearing on its own:** internal services are **never published**, so they have no host-side listener at all. Verify that by observation, not by assumption, in Step 3. Design §12.6's firewall table is **not satisfiable on this branch** — record it as a POC limitation, and note the compensating control is "no published port", which is a real boundary but a single one. **Defence in depth is reduced from two layers to one here**; that is a genuine security consequence of the human's option-3 choice and it belongs in the record rather than in a footnote.
+
+- [ ] **Step 3: Prove LibreNMS and every datastore are NOT directly reachable — the Critical check**
+
+**From the developer machine, not the server** — what matters is what an outsider can reach:
 
 ```bash
-# Order matters: allow 22 BEFORE enabling default-deny, or the session dies
-# and the host becomes unreachable — an outage caused by the hardening step.
-ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'sudo ufw status verbose'   # or: firewall-cmd --list-all
+nmap -Pn -p 80,443,3306,5432,6379,8000,8080,8443 10.121.77.206
+nmap -Pn -sU -p 162,514,1162,1514 10.121.77.206
 ```
-Expected: the allow-list above and **nothing more**.
+Expected on 0.4c:
+- **`8443` open** (the proxy), **`8080` open** (HTTP, redirecting to 8443).
+- **`3306`, `5432`, `6379`, `8000` closed or filtered** — no datastore and no direct LibreNMS listener.
+- **`1162/udp`, `1514/udp`** reachable; `162/udp`, `514/udp` **not** (we cannot bind them).
+- `80`, `443` closed.
 
-**Stop if** any pre-existing allow rule would be removed by our default-deny — that rule exists for something, and removing it is guardrail 3. Report the conflict instead.
-
-- [ ] **Step 3: Prove LibreNMS is NOT directly reachable — the Critical check**
-
-**From the developer machine, not the server:**
-
-```bash
-nmap -Pn -p 80,443,3306,5432,6379,8000,8080 10.121.77.206
-```
-Expected: `443` open; **`3306`, `5432`, `6379`, `8000`, `8080` closed or filtered.**
-
-If any of those answer, **STOP**. With `auth_mechanism = sso`, a directly reachable LibreNMS means anyone who can reach it can assert `admin` by setting one header — an authentication bypass (design §12.4). This is not a hardening nicety to defer, and **`sso` must not be enabled until this check passes.**
+If any datastore port answers, **STOP**. With `auth_mechanism = sso`, a directly reachable LibreNMS means anyone who can reach it can assert `admin` with one header — an authentication bypass (design §12.4). **On 0.4c this check carries more weight than on either other branch**, because Step 2's firewall layer does not exist: "not published" is now the *only* thing standing between the network and LibreNMS. **`sso` must not be enabled until this check passes.**
 
 - [ ] **Step 4: Register the OIDC clients at Keycloak and configure the proxy as the OIDC client**
 
@@ -585,7 +915,7 @@ Configure the proxy to **strip any inbound identity headers** before setting its
 
 - [ ] **Step 5: Configure LibreNMS's `sso` mechanism**
 
-Using `lnms config:set` (Compose: `docker compose exec -T --user librenms librenms lnms …`), apply design §12.4's configuration. The three values that are security controls rather than preferences:
+Using `lnms config:set` — **on 0.4c: `podman exec --user librenms nms-librenms lnms …`** (0.4a used `docker compose exec -T --user librenms librenms lnms …`) — apply design §12.4's configuration. The three values that are security controls rather than preferences:
 
 ```bash
 lnms config:set sso.static_level 0                       # unmapped -> NO access (fail-closed)
@@ -599,7 +929,8 @@ Expected: each returns success. `static_level 0` is what makes ADR 0003's fail-c
 - [ ] **Step 6: Test the auth mechanism with the docs' own tool**
 
 ```bash
-ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'cd ~/nms-deploy && docker compose exec -T --user librenms librenms ./scripts/auth_test.php -u <test-user>'
+# 0.4c form (0.4a used: cd ~/nms-deploy && docker compose exec -T --user librenms librenms ...)
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'podman exec --user librenms nms-librenms ./scripts/auth_test.php -u <test-user>'
 ```
 Expected: the mechanism resolves the user and the mapped level. Record the resolved level; **do not record any credential the tool prompts for.**
 
@@ -608,6 +939,15 @@ Expected: the mechanism resolves the user and the mapped level. Record the resol
 ---
 
 ## Task 0.6: FR-58 deployment verification — **[DEVELOPER AGENT EXECUTES via SSH]** — GATES Task 6
+
+> ### Revision 4 reconciliation — branch 0.4c (read before any step)
+>
+> Substitutions for every step below: **`https://10.121.77.206:8443`** for `https://10.121.77.206`; **`podman exec nms-<svc>`** for `docker compose exec -T <svc>`; **`~/nms`** for `~/nms-deploy`; **traps to `1162/udp`**, **syslog to `1514/udp`**.
+>
+> **Two FR-58 checks change in substance, not just in port number:**
+>
+> 1. **Step 7 (traps + syslog) now verifies the high ports, which is a partial verification of FR-56.** FR-56 as approved names 161/162/514. This deployment receives traps on **1162** and syslog on **1514** because rootless Podman cannot bind below 1024 and no redirect can be installed without root. Our **simulators can be pointed at the high ports, so the end-to-end path is genuinely exercised** — but **real network devices cannot**, since a device's trap destination port is usually not configurable and its syslog port rarely is. **FR-58 is therefore satisfied for the simulator-fed POC and NOT for real devices.** Record it exactly that way; do not tick FR-56 as met. The wording question is routed to the human — see the POC limitations section.
+> 2. **Step 9 (header-injection bypass) must be re-aimed.** The original probes `http://10.121.77.206:8000/`, which is LibreNMS's published port under the Compose example. On 0.4c LibreNMS is **not published at all**, so 8000 was never the exposure. The equivalent test is to confirm **no host-side listener exists for LibreNMS or any datastore**, and that a forged identity header presented to the *proxy* is stripped rather than honoured. Both forms are specified below. **This remains the Critical check of the entire package**, and on 0.4c it is the *only* barrier, because Task 0.5 Step 2's firewall layer does not exist.
 
 No dependent work starts until every check passes. This is the Phase 0 gate.
 
@@ -627,14 +967,14 @@ Expected: the token exists and is usable in Step 2. Evidence records `LIBRENMS_A
 
 ```bash
 # Token is read from the environment; it is NOT written into the command text.
-curl -s -H "X-Auth-Token: $LIBRENMS_API_TOKEN" https://10.121.77.206/api/v0/system | head -c 400
+curl -sk -H "X-Auth-Token: $LIBRENMS_API_TOKEN" https://10.121.77.206:8443/api/v0/system | head -c 400
 ```
 Expected: a JSON system payload including the LibreNMS version. **Record the payload with any token echo removed.**
 
 - [ ] **Step 3: Unauthenticated API call is refused — negative check**
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' https://10.121.77.206/api/v0/system
+curl -sk -o /dev/null -w '%{http_code}\n' https://10.121.77.206:8443/api/v0/system
 ```
 Expected: **`401`** (or 403). **Not 200, and not a 302 to the IdP login page** — a redirect here means Task 0.5 Step 4 exempted `/api/` incorrectly and the BFF will break in Task 6. A `200` is a Critical finding.
 
@@ -653,62 +993,86 @@ Expected: device added, discovery finds interfaces, poll completes without error
 Wait for two poll cycles, then:
 
 ```bash
-curl -s -H "X-Auth-Token: $LIBRENMS_API_TOKEN" "https://10.121.77.206/api/v0/devices/<id>/ports" | head -c 600
+curl -sk -H "X-Auth-Token: $LIBRENMS_API_TOKEN" "https://10.121.77.206:8443/api/v0/devices/<id>/ports" | head -c 600
 ```
 Expected: interface counters that have **advanced** between the two observations. A device row with a timestamp proves it was added; only moving counters prove polling. Presence alone would let a broken poller pass this gate.
 
 - [ ] **Step 6: Confirm metrics are landing — in RRD AND in TimescaleDB**
 
 ```bash
-ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'cd ~/nms-deploy && docker compose exec -T librenms ls -la --time-style=+%H:%M:%S /opt/librenms/rrd/<device-hostname>/ | head'
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'podman exec nms-librenms ls -la --time-style=+%H:%M:%S /opt/librenms/rrd/<device-hostname>/ | head'
 ```
 Expected: `.rrd` files with mtimes inside the last poll interval.
 
 Then the check that OQ-3's resolution makes mandatory — **the LibreNMS→TimescaleDB write path is verified, not assumed** (ADR 0005 revision 2):
 
 ```bash
-ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'cd ~/nms-deploy && docker compose exec -T timescaledb psql -U <user> -d <db> -c "\dt" -c "SELECT count(*) FROM <metrics_table> WHERE time > now() - interval \"10 minutes\";"'
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 'podman exec nms-timescaledb psql -U <user> -d <db> -c "\dt" -c "SELECT count(*) FROM <metrics_table> WHERE time > now() - interval \"10 minutes\";"'
 ```
 Expected: the metrics table exists **and** the recent-row count is **> 0**. **A count of 0 is a FAIL, not a warning** — it means LibreNMS is writing to RRD only and every Phase 2 chart would query an empty store. Report it as a Phase 0 finding; do not compensate in the BFF.
 
-- [ ] **Step 7: Confirm traps and syslog are received**
+- [ ] **Step 7: Confirm traps and syslog are received — on the HIGH ports, and read the FR-56 caveat**
 
 ```bash
-snmptrap -v2c -c <community-from-env> 10.121.77.206:162 '' 1.3.6.1.6.3.1.1.5.1
-logger -n 10.121.77.206 -P 514 -d "nms-deployment-test"
+# 1162/udp and 1514/udp, NOT 162/514 -- rootless cannot bind below 1024.
+snmptrap -v2c -c <community-from-env> 10.121.77.206:1162 '' 1.3.6.1.6.3.1.1.5.1
+logger -n 10.121.77.206 -P 1514 -d "nms-deployment-test"
 ```
-Expected: both appear in LibreNMS (Eventlog / Syslog). Confirms FR-56's UDP 162/514 paths end-to-end rather than just being open in the firewall.
+Expected: both appear in LibreNMS (Eventlog / Syslog), **attributed to the correct source device** — not merely present. Attribution is the real assertion here, and it is what the Task 0.4c Step 5 `pasta` port-forwarder fix exists to make possible: with the default rootless forwarder both messages arrive from the container gateway and LibreNMS files them against nothing while every port check still looks correct.
+
+**If messages arrive but are unattributed or attributed to a gateway address: STOP** and revisit Task 0.4c Step 5. Do not compensate for it in the BFF.
+
+**FR-56 caveat, recorded not resolved.** This verifies the trap/syslog path **for senders that can be told to use a non-standard port** — our simulators can; **real devices generally cannot**. FR-56 as approved names 162 and 514. **Do not mark FR-56 satisfied on this evidence.** Record it as a POC limitation and leave the requirement wording to the human.
 
 - [ ] **Step 8: SSO end-to-end, including the fail-closed case**
 
-1. Browse to `https://10.121.77.206/` as a user in a **mapped** group → reaches the native UI with **no second credential prompt** (AC-A#3); user exists at the mapped level (AC-A#4).
+1. Browse to `https://10.121.77.206:8443/` as a user in a **mapped** group → reaches the native UI with **no second credential prompt** (AC-A#3); user exists at the mapped level (AC-A#4).
 2. Change that user's group to a different mapped group, log in again → level updated (AC-A#5).
 3. As a user in **no** mapped group → **access denied** (this is `sso.static_level 0` working; **if this user gets in, the fail-closed control is broken — Critical**).
 4. Log out → revisiting requires re-authentication (AC-A#7).
 
 Test-user passwords are created in Keycloak and **never recorded**.
 
-- [ ] **Step 9: Header-injection negative test — Critical**
+- [ ] **Step 9: Header-injection negative test — Critical, and re-aimed for 0.4c**
 
-From a machine that can reach the server, attempt to reach LibreNMS **bypassing the proxy**, with a forged identity header:
+On 0.4c LibreNMS has **no published host port at all**, so the original `:8000` probe would pass trivially and prove nothing. Three probes replace it, and all three must pass.
+
+**9a — no host-side listener for LibreNMS or any datastore.** From the developer machine:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Remote-User: admin' http://10.121.77.206:8000/
+nmap -Pn -p 3306,5432,6379,8000,8080,8443 10.121.77.206
 ```
-Expected: **connection refused / filtered** (the port is not reachable at all). If this returns 200, an unauthenticated attacker can become `admin` — **STOP, report as Critical to Jarvis immediately** per team-protocol §6, regardless of what else passed.
+Expected: `8080`/`8443` open; **`3306`, `5432`, `6379`, `8000` closed or filtered.** Any datastore or direct-LibreNMS listener answering is a **Critical** finding: with `sso` enabled, direct reachability is an authentication bypass. **On this branch there is no firewall behind this check** — "not published" is the whole boundary.
+
+**9b — the proxy strips forged identity headers.** The attack that remains available once 9a holds is presenting the header *through* the proxy:
+
+```bash
+curl -sk -o /dev/null -w '%{http_code}\n' -H 'X-Remote-User: admin' https://10.121.77.206:8443/
+curl -sk -H 'X-Remote-User: admin' https://10.121.77.206:8443/ | grep -ci "admin" || true
+```
+Expected: the request is treated as **unauthenticated** — a 302 to the IdP or a 401, **never a 200 authenticated as `admin`**. If the forged header authenticates, the proxy is forwarding client-supplied identity headers instead of replacing them, and that is a **Critical** authentication bypass (design §12.4). Stop and report immediately per team-protocol §6.
+
+**9c — from the host itself, confirm LibreNMS only trusts the proxy.** `sso.trusted_proxies` must name the proxy's container address only:
+
+```bash
+ssh -i ~/.ssh/nms_deploy_ed25519 <user>@10.121.77.206 \
+  'podman exec --user librenms nms-librenms lnms config:get sso.trusted_proxies
+   podman exec --user librenms nms-librenms lnms config:get sso.static_level'
+```
+Expected: `trusted_proxies` contains **only** the proxy's address on the `nms` network (never a broad range, never `0.0.0.0/0`), and `static_level` is **`0`**. A permissive `trusted_proxies` re-opens 9b from anywhere on the container network; a non-zero `static_level` breaks ADR 0003's fail-closed rule.
 
 - [ ] **Step 10: BFF host reaches the API**
 
 From the machine that will run the BFF:
 
 ```bash
-curl -s -o /dev/null -w '%{http_code}\n' -H "X-Auth-Token: $LIBRENMS_API_TOKEN" https://10.121.77.206/api/v0/system
+curl -sk -o /dev/null -w '%{http_code}\n' -H "X-Auth-Token: $LIBRENMS_API_TOKEN" https://10.121.77.206:8443/api/v0/system
 ```
 Expected: `200`. If TLS uses a private/self-signed CA, the BFF host must trust that CA — a real configuration step, and the commonest cause of a Task 6 failure that looks like a code bug.
 
 - [ ] **Step 11: Record results and set `LIBRENMS_BASE_URL`**
 
-Write both the evidence file and `docs/design/librenms-deployment-verification.md` with one row per check: command, expected, actual, verdict. **No tokens, no passwords, no community strings, no `Credentials.md` content** — redacted. Then set `LIBRENMS_BASE_URL=https://10.121.77.206` in the developer's local `.env` (git-ignored).
+Write both the evidence file and `docs/design/librenms-deployment-verification.md` with one row per check: command, expected, actual, verdict. **No tokens, no passwords, no community strings, no `Credentials.md` content** — redacted. Then set `LIBRENMS_BASE_URL=https://10.121.77.206:8443` in the developer's local `.env` (git-ignored).
 
 - [ ] **Step 12: Report the gate result to Jarvis**
 
@@ -720,6 +1084,61 @@ All checks pass → **Task 6 is unblocked.** Any failure → report. Steps 3, 6 
 git add docs/design/librenms-deployment-verification.md
 git commit -m "docs: record FR-58 LibreNMS deployment verification results"
 ```
+
+---
+
+## POC limitations of the 0.4c rootless-Podman deployment — what this deployment does NOT demonstrate
+
+Added in revision 4. This section exists so that nobody later reads a green FR-58 verification as evidence of something it never tested. Each row is a consequence of the human's option-3 constraints, not a defect to be fixed by the Developer.
+
+| # | What is NOT demonstrated | Why | Consequence if ignored |
+|---|---|---|---|
+| **L-1** | **Trap and syslog receipt from real network devices** | Rootless Podman cannot bind ports <1024 (official `rootless.md`); traps land on **1162/udp**, syslog on **1514/udp**. Real devices send to **162/514** and generally cannot be reconfigured. No redirect (iptables, `redir`, `ip_unprivileged_port_start`) can be installed without root | **FR-56 is NOT met** for real devices. A "traps working" result here is a simulator result only. **This is the most consequential limitation in the list** |
+| **L-2** | **A host-level firewall / network-layer source restriction** | `ufw`/`firewall-cmd` need sudo; `firewalld` is inactive and enabling it risks other tenants' traffic | Design §12.6's firewall table is **unsatisfiable here**. The only boundary protecting MariaDB/Redis/TimescaleDB/LibreNMS is "the port is not published" — **one layer instead of two.** 8443 is reachable from anywhere that can route to the host |
+| **L-3** | **Production scale** | POC scale is **tens of devices** by explicit constraint; 35 GB disk on a shared volume; no swap | Says nothing about **NFR-01 / FR-53 (>5,000 devices)**. ADR 0008 already puts a single LibreNMS instance at "1,000+" and directs you to distributed polling beyond that. Do not extrapolate from this deployment |
+| **L-4** | **High availability, failover, or backup/restore** | Single host, single instance of every service, no replication, no off-host backup | A host loss loses the deployment. The human's VM snapshot is the only recovery, and it is **outstanding** |
+| **L-5** | **Survival of a host reboot — CONDITIONAL** | Depends on `loginctl enable-linger` succeeding (Task 0.4c Step 9). Upstream systemd policy makes self-lingering unprivileged, so this is *expected* to work, but it is verified at runtime, not guaranteed | If lingering is unavailable (Step 9-ALT), the stack **does not restart after a reboot or logout** and needs a manual `systemctl --user start`. Must be stated loudly if it lands that way |
+| **L-6** | **Isolation from co-tenants' resource use** | Shared host with Kafka, ZooKeeper, two Python services, Samba, and a GNOME desktop. No cgroup reservation is possible without root | Our latency measurements are **not reproducible** — NFR timings measured here are contaminated by neighbours. Conversely, our load could degrade theirs |
+| **L-7** | **A production-grade identity solution** | Co-hosted POC Keycloak realm, shares a failure domain with what it authenticates, no MFA/lifecycle/audit posture (ADR 0008 Decision 4) | Already recorded; unchanged by this revision |
+| **L-8** | **TLS with a publicly-trusted certificate** | ACME HTTP-01 needs inbound port 80 (unbindable) and public DNS (RFC1918 address). Corporate CA or POC self-signed only | The BFF host must be configured to trust a private CA. **Still an outstanding human decision** |
+| **L-9** | **Privileged-port SNMP polling source behaviour** | Outbound SNMP to **161/udp** is unaffected (outbound needs no privilege), but the host is **dual-homed** (`10.121.77.206` / `10.121.78.206`) and rootless networking adds a NAT layer | Source-address selection for outbound polls is **not verified** by this package. If a device ACLs by source IP, this needs discovery before it bites |
+| **L-10** | **That the deployment is invisible to co-tenants** | We add ~several GB of images plus growing RRD/TSDB data to a **35 GB shared** filesystem, and CPU/RAM load to a shared host | Disk is the realistic shared-resource risk. Retention limits (below) are a co-tenancy obligation, not housekeeping |
+
+### Retention and cleanup — a co-tenancy obligation, not housekeeping
+
+35 GB free on `/` is the entire budget, and it is shared with whatever the other tenants write. Three stores grow continuously and **all three must be bounded before the stack runs unattended**:
+
+| Store | Growth driver | Bound to configure |
+|---|---|---|
+| **RRD** (`~/nms/rrd`) | ports × retention; fixed-size files, so growth is per-port-added rather than unbounded over time | Fixed after device count settles. Record actual size after Task 0.6 and re-check weekly |
+| **TimescaleDB** | every metric write, continuously | Set a **retention policy / `drop_chunks`** window (POC: 14–30 days). **Unbounded by default — this is the most likely cause of a slow disk-exhaustion incident** |
+| **Container logs + images** | `podman logs` growth; image layers on every pull | Cap per-container logging (`LogDriver`/`--log-opt max-size`); `podman image prune` **only for `nms-`-prefixed images we pulled** — never a blanket `podman system prune`, which on a shared account could remove another user's images |
+| **LibreNMS syslog/eventlog tables (MariaDB)** | syslog volume | Enable LibreNMS's own syslog purge (`syslog_purge`) and eventlog purge |
+
+**Add a disk check to the operating routine, not just the install:** `df -h /` at 80% is the standing abort. A monitoring platform that fills a shared production host's root filesystem would be an unusually poor advertisement for itself.
+
+### FR-56: the requirement conflict — ROUTED TO THE HUMAN, not resolved here
+
+**FR-56 as approved reads:** *"Required network access SHALL be documented and configured: inbound HTTP/HTTPS for the native UI and API, **SNMP/UDP 161** outbound to managed devices, **UDP 162** inbound for traps, **UDP 514** inbound for syslog, and access from the BFF host to the LibreNMS API. Ports not required SHALL NOT be exposed."*
+
+**What this deployment can actually do:**
+
+| FR-56 clause | 0.4c reality | Verdict |
+|---|---|---|
+| Inbound HTTP/HTTPS | **8080 / 8443** instead of 80/443 | Intent met; port numbers differ |
+| **SNMP/UDP 161 outbound** | Unaffected — outbound needs no privilege | **Met** |
+| **UDP 162 inbound (traps)** | **1162/udp**. Real devices cannot be redirected | **NOT met** for real devices; met for simulators |
+| **UDP 514 inbound (syslog)** | **1514/udp**. Same | **NOT met** for real devices; met for simulators |
+| BFF → LibreNMS API | Met, via `https://10.121.77.206:8443` | **Met** |
+| Ports not required SHALL NOT be exposed | **Better than the approved design** — only 4 ports published, datastores have no host listener at all | **Met** |
+
+**I am not rewriting FR-56.** It is a human-approved requirement and the conflict is substantive, not editorial: changing 162→1162 in the requirement would quietly convert "this platform can receive traps from the estate" into "this platform can receive traps from things we configure specially", which is a different product claim.
+
+**Recommended wording for the human** (Jarvis to route; the Architect does not apply it unilaterally). Keep FR-56 exactly as approved as the **production** requirement, and add a scoped deployment note:
+
+> **FR-56a (POC deployment exception, host `10.121.77.206`, added 2026-08-09).** On the rootless-Podman POC deployment, trap and syslog receivers bind **1162/udp** and **1514/udp** respectively, because rootless containers cannot bind ports below 1024 and no privileged redirect may be installed on that host. FR-56's 162/514 requirement is therefore **verified against project-controlled simulators only** and is **NOT satisfied for real network devices**. Meeting FR-56 as written requires either (a) root on the deployment host to install a port redirect, (b) a privileged/dedicated host running branch 0.4a or 0.4b, or (c) a device-side change to non-standard destination ports, which is generally not available. **Production deployment MUST satisfy FR-56 as originally worded.**
+
+**The decision the human is actually being asked to make** is not about wording. It is: *is a POC that cannot receive traps from a real device sufficient for this phase's purpose?* If the POC's goal is to prove the UI/BFF/SSO architecture against a working collection engine, the answer is plausibly yes. If it is to prove the platform can ingest from the real estate, the answer is no and a privileged host is needed. **That is a scope question, and it belongs to the human.**
 
 ---
 

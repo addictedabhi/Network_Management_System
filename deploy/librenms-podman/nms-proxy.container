@@ -1,0 +1,23 @@
+[Unit]
+Description=NMS TLS gateway (8443/8080) - the only published TCP ports
+After=nms-network.service nms-librenms.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-proxy
+Image=docker.io/library/nginx:1.27-alpine
+Network=nms.network
+# The ONLY two published TCP ports in the whole stack.
+PublishPort=8080:8080
+PublishPort=8443:8443
+# Single-consumer mounts -> :Z (private label) is correct here.
+Volume=%h/nms/config/nginx.conf:/etc/nginx/nginx.conf:Z,ro
+Volume=%h/nms/config/tls:/etc/nginx/tls:Z,ro
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,18 @@
+[Unit]
+Description=NMS Redis (LibreNMS dispatcher lock/queue backend)
+After=nms-network.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-redis
+Image=docker.io/library/redis:7.4-alpine
+Network=nms.network
+# NOT published
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+
+[Install]
+WantedBy=default.target

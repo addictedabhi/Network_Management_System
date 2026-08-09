@@ -11,6 +11,8 @@
 
 > **Revision 2 (2026-08-09).** OQ-22 was resolved in a way that **enlarged scope**: LibreNMS is installed by this project on a **human-provided remote server** (FR-54..58), not assumed pre-existing. This revision **extends** v1 — no v1 decision is withdrawn except one premise in ADR 0003 that the official LibreNMS documentation contradicts (§12.4, ADR 0008 Decision 3). New material: **§12 (LibreNMS deployment work package)**, **ADR 0008**, revised estimate (§11), updated open-question rows (§9). **REVISED by revision 3 (2026-08-09):** the human authorized agent execution on `10.121.77.206` — the **Developer agent executes** the deployment under six guardrails; see §12.1, which retains the former "human executes" position as superseded context.
 
+> **Revision 4 (2026-08-09) — doc-only amendment.** Task 0.1's reconnaissance measured Docker absent, Compose absent, no usable sudo, and a **shared host** carrying a third party's production Kafka/ZooKeeper estate on `10.121.77.206`. The human chose a **rootless-Podman POC deployment** with co-tenancy consent (ADR 0008 **revision 3**, plan Task **0.4c**). **New §12.9** records the resulting port/URL facts (**8443/8080, 1162/udp, 1514/udp**, `LIBRENMS_BASE_URL=https://10.121.77.206:8443`, storage at `~/nms`), the controls that are **no longer available** (no host firewall — §12.6's table is unsatisfiable), and one rootless trap that would otherwise break trap/syslog attribution silently. **No architectural decision is withdrawn**; ADR 0002 and §12.4 are intact.
+>
 > **Revision 3 (2026-08-09) — doc-only amendment to the G2-approved design.** Three changes, no new architecture: (1) **§12.1's execution posture is inverted** — agents execute the deployment on `10.121.77.206` under guardrails, with the pre-flight snapshot and every STOP decision staying with the human; (2) the resolved decisions are folded in — **TimescaleDB** (OQ-3, ADR 0005 rev 2), **Keycloak co-hosted subject to a 4 vCPU / 8 GB floor check** (OQ-25/OQ-2), **Docker Compose** as the method with native demoted to a discovered-fact fallback (OQ-24), **TR-069 simulator-tolerance only** (OQ-21, ADR 0004 accepted), and **P2P vendors = Cambium + Ubiquiti** (OQ-11, ADR 0007 rev 2 — still Phase 2 work); (3) **§12.2 changes from "twelve questions for the human" to "facts discovered by SSH"**. No Phase 1 design decision is withdrawn.
 
 ---
@@ -692,6 +694,8 @@ sso.email_attr / realname_attr = <claims>
 
 ### 12.6 Network access (FR-56) — nothing else exposed
 
+Default-deny; only these. **REVISION 4: on the selected rootless-Podman branch (0.4c) this entire table is UNSATISFIABLE — no host firewall is available without sudo. See §12.9 before using it.**
+
 Default-deny; only these:
 
 | Direction | Port/Proto | Peer | Purpose | Notes |
@@ -712,6 +716,8 @@ Default-deny; only these:
 
 ### 12.7 Deployment verification (FR-58) — the Phase 0 gate
 
+**REVISION 4: for the selected 0.4c branch, ports and URLs in this table are overridden by §12.9** (8443/8080, 1162/udp, 1514/udp); checks 4, 8 and 10 change in substance.
+
 Every check has an expected observable result — originally because the human ran them and reported back, and now additionally because **expected-vs-actual is the evidence contract** for agent execution. Full command sequence: plan Task 0.6.
 
 | # | Check | Expected result | Requirement |
@@ -730,6 +736,52 @@ Every check has an expected observable result — originally because the human r
 | 12 | `LIBRENMS_BASE_URL` recorded | Set in the developer's runtime config; **never committed with a real value** | FR-58, NFR-09 |
 
 Checks 4, 5 (negative half), 9 (unmapped half) and **10** are negative tests. They exist because a deployment that passes only its positive checks has demonstrated that it works, not that it is safe.
+
+### 12.9 Revision 4 (2026-08-09) — the rootless-Podman deployment shape for `10.121.77.206`
+
+**This subsection overrides the port and URL facts in §12.6 and §12.7 for the selected deployment branch (plan Task 0.4c).** No architectural decision changes: the topology, the BFF-only data path (ADR 0002), the authenticating-proxy SSO bridge (§12.4), and the "datastores are never exposed" rule are all unchanged. What changes is which ports they occupy and which controls are available to enforce them.
+
+**Why:** Task 0.1 measured Docker absent, Compose absent, and no usable sudo on a shared host running a third party's production Kafka estate. The human chose a rootless-Podman POC deployment with co-tenancy consent (ADR 0008 revision 3). Rootless containers **cannot bind ports below 1024** (Podman `rootless.md`), and every workaround needs root.
+
+#### Port and URL facts (authoritative for this deployment)
+
+| Concern | §12.6 says | **0.4c actual** |
+|---|---|---|
+| HTTPS / native UI / REST API | 443/TCP | **8443/TCP** |
+| HTTP | 80/TCP (ACME only) | **8080/TCP** — and **ACME is impossible**: no bindable 80, RFC1918 address, no public DNS. Corporate CA or POC self-signed only |
+| SNMP traps inbound | 162/UDP | **1162/UDP** |
+| Syslog inbound | 514/UDP | **1514/UDP** |
+| SNMP polling outbound | 161/UDP | **161/UDP — unchanged.** Outbound needs no privilege |
+| `LIBRENMS_BASE_URL` | `https://10.121.77.206` | **`https://10.121.77.206:8443`** |
+| Storage root | `~/nms-deploy` | **`~/nms`** (never `/opt/airlinq` — a third party's volume) |
+| Datastores (MariaDB, Redis, TimescaleDB) + LibreNMS HTTP | Internal only | **Internal only — unchanged, and now the ONLY boundary.** Not published to any host interface |
+
+**`LIBRENMS_BASE_URL` now carries a port, and that propagates further than it looks.** Every consumer must agree: the BFF's runtime config, `.env.example`, §2's client module, the OIDC **`redirect_uri` registered at Keycloak**, and the proxy's own external URL. A `redirect_uri` mismatch is the commonest OIDC failure and it presents as a login loop, not as a configuration error.
+
+#### Controls that are NOT available on this branch — stated, not buried
+
+| §12.6 control | 0.4c status |
+|---|---|
+| **Default-deny host firewall** (the whole §12.6 table) | **UNSATISFIABLE.** `ufw`/`firewall-cmd` need sudo; `firewalld` is inactive and enabling it would risk co-tenants' traffic. **Do not attempt it** |
+| Source-restricting trap/syslog senders | **Not available** at the network layer; LibreNMS-side device filtering only |
+| Source-restricting who reaches the UI | **Not available.** 8443 is reachable from anywhere that routes to the host |
+
+**The security consequence, stated plainly.** §12.4's header-injection boundary was protected by two layers: a firewall *and* "LibreNMS is never published". **Only the second survives.** It is a real boundary — a container with no published port has no host-side listener at all — but it is now the entire defence, so §12.7 check 10 and check 4 move from "important" to "the only thing standing there". Plan Task 0.6 Step 9 accordingly re-aims that test in three parts: no host listener (9a), the proxy strips forged identity headers (9b), and `sso.trusted_proxies` names only the proxy with `sso.static_level=0` (9c).
+
+#### One rootless-specific correctness trap that affects a functional requirement
+
+Rootless bridge networks default to the `rootlessport` forwarder, which Podman's networking documentation states *"does not preserve client source IPs"*; the documented fix is `rootless_port_forwarder="pasta"` in `containers.conf` `[network]`. **LibreNMS attributes traps and syslog to a device by source IP.** Without this setting every trap and syslog message arrives appearing to come from the container gateway and is filed against no device — while ports, logs, and `ss` output all look correct. This is set in plan Task 0.4c Step 5 and **proven empirically** in Step 10(3); it is not accepted on the strength of the config alone.
+
+#### §12.7 verification table — how the checks change
+
+- **Check 3 (HTTPS)** → `https://10.121.77.206:8443`.
+- **Check 4 (no unintended exposure)** → expect **8080/8443 open, 1162/1514 UDP reachable**, and **3306 / 5432 / 6379 / 8000 closed or filtered**. 443 and 80 are closed.
+- **Check 8 (traps + syslog)** → sent to **1162** and **1514**, and the assertion strengthens: messages must be **attributed to the correct source device**, not merely present.
+- **Check 10 (header injection)** → re-aimed as 9a/9b/9c above, since LibreNMS has no published port to probe.
+- **Checks 1, 2, 5, 6, 7, 9, 11, 12** are unchanged in substance; only commands (`podman exec nms-<svc>`) and the base URL change.
+
+**Check 8 does not satisfy FR-56.** It verifies the path for senders that can be pointed at a non-standard port — our simulators can, **real devices generally cannot**. FR-56 as approved names 162/514. The conflict is recorded as a POC limitation and the requirement wording is **routed to the human**, not amended by the Architect. See the plan's "POC limitations" section for the recommended FR-56a text.
+
 
 ### 12.8 Rollback
 

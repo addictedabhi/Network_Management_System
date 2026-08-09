@@ -1,11 +1,12 @@
 # 0008. LibreNMS engine deployment: official Docker Compose on a human-provided host, with an authenticating-proxy SSO bridge
 
-- **Status:** **ACCEPTED (revision 2, 2026-08-09).** Approved by the human at G2. Every branch this ADR left open is now closed — see the Revision 2 section. **The "no agent executes" posture in the Context below is SUPERSEDED by Revision 2; it is retained verbatim because it records the reasoning that applied before the authorization, and an ADR records history.**
+- **Status:** **ACCEPTED (revision 3, 2026-08-09).** **Revision 3 supersedes Decision 1 for host `10.121.77.206` only: the install method there is ROOTLESS PODMAN, not Docker Compose** — Docker is absent and there is no usable sudo. Decisions 2, 3 and 5 stand; Decision 4 is re-checked and passes. See the Revision 3 section.
+- **Status (revision 2, retained):** **ACCEPTED (revision 2, 2026-08-09).** Approved by the human at G2. Every branch this ADR left open is now closed — see the Revision 2 section. **The "no agent executes" posture in the Context below is SUPERSEDED by Revision 2; it is retained verbatim because it records the reasoning that applied before the authorization, and an ADR records history.**
 - **Date:** 2026-08-09
 - **Deciders:** Human (approver), Technical Architect (author)
 - **Work item:** `nms-platform-foundation`
 - **Relates to:** FR-07, FR-13, FR-54..FR-58, NFR-09, DEP-10, OQ-2, OQ-23, OQ-24, OQ-25, AC-A#3..#5
-- **Amended by:** the Revision 2 section below, which supersedes the execution-ownership position only. All five original Decisions stand.
+- **Amended by:** the Revision 2 section (execution ownership) and the **Revision 3** section (install method for `10.121.77.206`, co-tenancy consent, POC limitations).
 - **Amends:** ADR 0003 (§"LibreNMS auto-provisioning") — see §6. **Does not change** ADR 0001, 0002, 0004, 0005, 0006, 0007.
 
 ## Context
@@ -82,8 +83,100 @@ Facts worth quoting because decisions rest on them:
 
 ---
 
+---
+
+## Revision 3 (2026-08-09): rootless Podman on a shared host — the install method Decision 1 did not contemplate
+
+**Status of this revision: ACCEPTED** by the human on 2026-08-09 as the resolution of Task 0.1's STOP conditions. **Decision 1's selected option (Docker Compose) is superseded FOR HOST `10.121.77.206` ONLY.** Decisions 2, 3 and 5 stand unchanged. Decision 4's floor check is re-run below and **passes**. All prior reasoning is retained verbatim — an ADR records history, and revision 1's and 2's arguments were not wrong, they were overtaken by measured facts.
+
+### What Task 0.1 measured, and why it invalidated both branches
+
+Revision 2 closed OQ-24 as "Docker Compose", explicitly noting the distinction that has now become load-bearing: *"'Docker Compose is the approved method' and 'Docker is actually installed on that host' are different claims and only the first is established."* Task 0.1 executed and established the second — negatively.
+
+Evidence: `.claude/team/artifacts/nms-platform-foundation/deployment/task-0.1-facts.md`.
+
+| Measured fact | Effect on Decision 1 |
+|---|---|
+| **Docker absent; Compose v1 and v2 both absent** | Option A **cannot be executed**. Installing a container runtime is a system-wide change requiring root |
+| **No usable non-interactive sudo** (account is in `wheel`, but `sudo -n` fails and using the SSH password for sudo is forbidden by the credential rules) | Option A's install path and **all of Option B** are unreachable. Option B needs root from its first command to its last |
+| **Podman 5.6.0 present** (EL9's native runtime) | A **third option exists** that revision 1 did not enumerate, and it needs no privilege at all |
+| **Host is shared and busy**: third-party Kafka 3.9.1 + ZooKeeper 3.8.4 under `/opt/airlinq/Thunder_Sprint_1/` (user `aqadmin`), two Python services on 8077/5000 owned by *our own* login account, a `@reboot` cron starting `stc-cmp-wisdom`, Samba, GNOME desktop, `sssd` domain join, ~39 days uptime | Guardrail 4 (STOP if shared) fired. Option B — which installs packages, creates users, and edits system-wide config — becomes the **highest-blast-radius** choice available |
+| **SELinux Enforcing**; **35 GB free on `/`** (`/var` and `/opt` not separate); `/opt/airlinq` is the third party's 149 GB volume | Volume labelling is mandatory. Disk is **below** revision 2's own 60 GB floor and the only large volume is not ours to use |
+| **32 vCPU / 62 GiB RAM** | Decision 4's floor is cleared by ~8× — see the Keycloak verdict below |
+
+Three of Task 0.1's four STOP conditions fired (shared host, no sudo, Docker absent). Under revision 2's guardrails that correctly **ended the task** and returned the decision to the human.
+
+### The human's decision: option 3
+
+The human chose to **proceed on this host** with a **minimal-footprint, rootless-Podman POC deployment, no sudo, and explicit consent to co-tenancy** with the existing workloads.
+
+**Recorded plainly because consent is a decision with a cost:** the human has accepted running our POC alongside a third party's production Kafka estate on a host neither we nor they provisioned for this purpose. That consent covers **co-tenancy**; it does not license interference. The plan's Task 0.4c therefore converts the consent into mechanical constraints — `nms-`-prefixed everything, `~/nms`-only storage, an off-limits list (Kafka, ZooKeeper, 8077, 5000, Samba), append-only edits to the two shared files we touch, an enumerable teardown procedure, and three standing aborts (sudo / interference / disk >80%).
+
+### Decision 1-c (new) — rootless Podman with systemd `--user` quadlet units
+
+**SELECTED for `10.121.77.206`.** Grounded in official documentation retrieved 2026-08-09, not recall — rootless behaviour differs from Docker in ways that change the design, not merely the commands:
+
+| Source | Fact | Design consequence |
+|---|---|---|
+| `containers/podman` `rootless.md` | *"Podman can not create containers that bind to ports < 1024"*; workarounds are a kernel firewall rule, `redir`, or lowering `net.ipv4.ip_unprivileged_port_start` — **all requiring root** | **Ports are forced to 8080/8443/1162/1514.** This is not a preference and no unprivileged workaround exists. It is the root cause of the FR-56 conflict |
+| `podman-systemd.unit(5)` | Rootless quadlet search path includes **`~/.config/containers/systemd/`**; quadlet units *"do not support running as a non-root user by defining the User, Group, or DynamicUser systemd options"* — you run them as the user instead | Startup is **per-user quadlet**, entirely unprivileged, and version-controllable in this repo — preserving FR-55's "repeatable via a versioned file" property that made Compose attractive |
+| systemd `org.freedesktop.login1.policy` | **`set-self-linger`: `allow_any=yes`** / `set-user-linger`: `auth_admin_keep` | **`loginctl enable-linger` for one's OWN account needs no privilege.** Boot/logout persistence is achievable without sudo. Verified at runtime (Task 0.4c Step 9), never assumed — local polkit overrides are possible |
+| `podman-run(1)` | `:Z` = **private unshared** label, *"Only the current container can use a private volume"*; `:z` = **shared** label; all containers in a **pod** share one label | The RRD tree has **three** consumers (`librenms`, `dispatcher`, `rrdcached`), so it takes **`:z`**; single-consumer database mounts take **`:Z`**. A literal "use `:Z` everywhere" reading would **break the stack** with confusing permission errors |
+| `podman-run(1)` | `idmap` *"is only supported by Podman in rootful mode. The Linux kernel does not allow the use of idmapped file systems for unprivileged users"* | Container-side ownership is handled with `UserNS=keep-id:uid=,gid=` and **named volumes preferred over bind mounts** for database data |
+| Podman `basic_networking.md` | Rootless bridge networks default to `rootlessport`, *"a userspace proxy that does not preserve client source IPs"*; fix is `rootless_port_forwarder="pasta"` in `containers.conf` `[network]` | **The highest-risk sleeper in this branch.** LibreNMS attributes traps and syslog **by source IP**; without this every message arrives from the gateway and is filed against no device, while all port checks look correct. Task 0.4c Steps 5 and 10(3) set it and then **prove it empirically** |
+
+**Pros of Decision 1-c:**
+- **It is the only executable branch.** Both alternatives require privilege the account does not have.
+- **Smallest blast radius of the three by a wide margin.** Nothing system-wide; all state under `$HOME`; teardown is an enumerable list. On a shared production host this is the decisive property, and it is the same argument revision 2 made for Compose ("blast-radius containment is now a safety control, not a convenience") taken one step further.
+- **FR-55 repeatability is preserved.** Quadlet units are versioned files in this repo, exactly as the pinned Compose file would have been. Every image is pinned; no `latest`.
+- **SELinux is worked *with*, not around.** `:z`/`:Z` relabelling operates on our own files as our own user — **no policy change, no `chcon`, no `semanage`.**
+
+**Cons, stated without softening:**
+- **Privileged ports are unreachable.** FR-56 cannot be met for real devices. See the FR-56 conflict, routed to the human.
+- **No host firewall is possible.** Design §12.6's default-deny table is unsatisfiable without root. Defence in depth around LibreNMS drops **from two layers to one** — "the port is not published". That single layer is real, but it is now the *entire* boundary, which raises the severity of Decision 3's header-injection check rather than leaving it unchanged.
+- **Rootless networking adds a NAT/userspace layer** with the source-IP consequence above, and leaves outbound SNMP source-address selection unverified on a **dual-homed** host.
+- **Disk is below revision 2's own 60 GB floor** (35 GB, shared, no swap). Retention limits become an operational obligation, not housekeeping.
+- **Co-tenant contention is unmanaged.** No cgroup reservation is possible without root, so performance measured here is not reproducible in either direction.
+
+**Rejected alternatives at this revision:**
+- **`podman compose` / `podman-docker`.** Task 0.1 flagged these as a possible third path. Rejected: `podman compose` shells out to an external Compose provider that is **not installed** on this host, and installing one is a host change. Quadlet is Podman's own first-class, documented, rootless-capable unit format and needs nothing added.
+- **A single shared `.pod` for all containers** (which would make `:Z` uniformly safe, since a pod shares one SELinux label). Rejected: a pod also shares one network namespace and therefore one port space, coupling the sidecars more than the topology wants and making the "exactly four published ports" invariant harder to verify. Recorded as a revisit-if-needed option, not a dead end.
+- **Asking for sudo.** Explicitly excluded by the human's constraint, and correctly: on a domain-joined host whose accounts we do not administer, obtaining root would enlarge our blast radius over a third party's production estate to obtain a POC convenience.
+
+### Decision 4 re-check — the Keycloak floor: PASSES, but the binding constraint moved
+
+| Floor (ADR 0008 Decision 4) | Measured | Verdict |
+|---|---|---|
+| **> 4 vCPU** | **32 vCPU** (Xeon Gold 5420+) | **PASS** — ~8× |
+| **> 8 GB RAM** | **62 GiB total, 48 GiB available**, 14 GiB in use | **PASS** — ~7.75× |
+| *(60 GB disk — a report-not-stop item, not part of the co-host gate)* | **35 GB free on `/`**; the 92 GB free elsewhere is the third party's volume | **BELOW the floor** |
+
+**Verdict: the Keycloak co-host decision stands. Proceed.** The floor exists to prevent Keycloak's JVM footprint from making a small host uncomfortable, and this host is not small. Revision 2's caveat — *"if the human's server is at that floor, my recommendation flips"* — is **not triggered**; there is no need to route this back to Jarvis for a decision.
+
+**But the constraint that actually binds has moved from CPU/RAM to disk and neighbours,** and that is worth recording because it changes what to watch:
+- Keycloak's marginal cost is ~+2 vCPU / +2 GB / **+5–10 GB disk**. CPU and RAM are abundant; **disk is the scarce, shared resource.** Task 0.4c Step 12 therefore brings Keycloak up **last**, after a disk re-check, with the 80% abort still armed.
+- Every gigabyte we consume is a gigabyte unavailable to a third party's production Kafka on the same filesystem. The floor check passing does **not** mean the host is ours to fill.
+
+### Consequences of this revision
+
+**Positive:** the deployment can proceed on measured facts rather than assumptions; the footprint is the smallest of the three branches and fully reversible via an enumerable teardown; FR-55's repeatability survives the change of runtime; and two failure modes that would have presented as mysterious bugs — the `:z`/`:Z` shared-mount trap and the source-IP-preservation trap — are identified from documentation **before** execution rather than during it.
+
+**Negative, and these are real:** FR-56 is not met for real devices; the host firewall layer is gone, leaving Decision 3's trust boundary standing alone; disk is below our own stated floor on a filesystem we share with someone else's production system; and performance figures gathered here are not reproducible. **None of these is fixed by better execution** — they are inherent to deploying unprivileged on borrowed ground, and the correct response to any of them mattering is a privileged or dedicated host running branch 0.4a.
+
+**Neutral:** branches 0.4a and 0.4b remain fully specified in the plan and are unchanged. If a dedicated host appears, the migration is a branch selection — the same property revision 1 designed for, now used twice.
+
+### Still open after revision 3
+
+- **The pre-flight VM snapshot is still OUTSTANDING** (Task 0.1 Step 1). It matters *more* on a shared host than on a dedicated one. **Deployment must not begin without it.**
+- **TLS certificate source** — unchanged, and now narrower: ACME is impossible (no port 80, RFC1918, no public DNS), so it is a **corporate CA or a POC self-signed CA**. Human decision.
+- **FR-56 wording** — routed to the human with recommended text; see the plan's POC-limitations section. **Not resolved by this ADR.**
+- **`/etc/subuid` + `/etc/subgid` allocation for the deploying account** — **never captured by Task 0.1**, and rootless Podman cannot function without it. Verified as the first gate of Task 0.4c Step 3; populating it needs root, so its absence is a sudo requirement in disguise and a **STOP**.
+- **Whether the host can reach the simulators over UDP 161**, and **outbound SNMP source-address selection on a dual-homed host** — the latter is new at this revision and is not verified by this package.
+
 ## Decision 1 — Install method (OQ-24): the official Docker Compose distribution
 
+> **Revision 3 (2026-08-09):** for host `10.121.77.206` this Decision is **SUPERSEDED by Decision 1-c (rootless Podman)** — Docker and Compose are absent and there is no usable sudo. Option A remains the method of record for any future privileged or dedicated host. Read this Decision as the reasoning that still applies *when Docker is available*.
+>
 > **Revision 2:** the conditional formerly in this heading ("if Docker is permitted") is discharged — the human selected **Compose**. Option B below is retained as the fallback for one discovered fact only (Docker unavailable on the host), not as an open branch.
 
 ### Considered options
