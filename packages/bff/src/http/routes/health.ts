@@ -21,7 +21,44 @@ export interface HealthChecks {
  * The `checks` object carries a status, a latency, and a machine-readable code only —
  * never a hostname, DSN, credential, or upstream error body (NFR-09/NFR-15).
  */
-export function createHealthRouter(checks: HealthChecks, version: string): Router {
+/** Default per-dependency readiness budget. Short enough that a probe always answers. */
+export const DEFAULT_READY_TIMEOUT_MS = 2000;
+
+/**
+ * Races a dependency check against a timeout (finding 9).
+ *
+ * A `try/catch` around an await handles REJECTION but not HANGING: a black-holed TCP connect
+ * can stall for minutes, and a readiness probe that never answers leaves the instance neither
+ * ready nor drained, breaking NFR-21 drain semantics. A timeout is therefore treated as
+ * NOT-READY — fail closed, never "assume ok".
+ */
+async function checkWithTimeout(
+  run: () => Promise<DependencyHealth>,
+  timeoutMs: number
+): Promise<DependencyHealth> {
+  let timer: NodeJS.Timeout | undefined;
+  const unavailable: DependencyHealth = { status: 'error', error: 'UPSTREAM_UNAVAILABLE' };
+  try {
+    return await Promise.race([
+      // The upstream error body is deliberately discarded: it can carry a hostname, DSN or
+      // credential, and /ready is unauthenticated (NFR-09/NFR-15).
+      Promise.resolve()
+        .then(run)
+        .catch(() => unavailable),
+      new Promise<DependencyHealth>((resolve) => {
+        timer = setTimeout(() => resolve(unavailable), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export function createHealthRouter(
+  checks: HealthChecks,
+  version: string,
+  readyTimeoutMs: number = DEFAULT_READY_TIMEOUT_MS
+): Router {
   const router = Router();
   const startedAt = Date.now();
 
@@ -41,13 +78,10 @@ export function createHealthRouter(checks: HealthChecks, version: string): Route
   router.get('/ready', async (_req, res) => {
     const names = ['redis', 'librenms', 'idp', 'tsdb'] as const;
     const results = await Promise.all(
-      names.map(async (name) => {
-        try {
-          return [name, await checks[name]()] as const;
-        } catch {
-          return [name, { status: 'error', error: 'UPSTREAM_UNAVAILABLE' } as DependencyHealth] as const;
-        }
-      })
+      names.map(
+        async (name) =>
+          [name, await checkWithTimeout(() => checks[name](), readyTimeoutMs)] as const
+      )
     );
     const built = Object.fromEntries(results);
     const ready = results.every(([, r]) => r.status === 'ok');

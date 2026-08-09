@@ -1,4 +1,4 @@
-import type { ErrorRequestHandler } from 'express';
+import type { ErrorRequestHandler, RequestHandler } from 'express';
 import type { ApiFailure, ErrorCode } from '@nms/shared';
 import type { Logger } from '../../observability/logger.js';
 
@@ -15,7 +15,25 @@ export class AppError extends Error {
   }
 }
 
-export const notFoundHandler: ErrorRequestHandler = (_err, _req, _res, next) => next();
+/**
+ * Terminal 404 handler (finding H-5).
+ *
+ * Must be a PLAIN RequestHandler, not an ErrorRequestHandler: it runs when no route matched
+ * and no error was raised. The previous 4-argument `ErrorRequestHandler` signature that called
+ * `next()` was doubly inert — Express only invokes 4-arg middleware on the error path, and it
+ * forwarded rather than responding. Unmatched routes therefore fell through to Express's
+ * default HTML page, bypassing the JSON envelope and advertising the framework.
+ *
+ * Mounted AFTER all routers and BEFORE the error handler.
+ */
+export const notFoundHandler: RequestHandler = (_req, res) => {
+  const body: ApiFailure = {
+    success: false,
+    errors: [{ code: 'NOT_FOUND', message: 'The requested resource was not found.' }],
+    meta: { requestId: String(res.locals.correlationId ?? 'unknown') }
+  };
+  res.status(404).json(body);
+};
 
 /**
  * Centralized error boundary. Known `AppError`s map to their declared status and code;

@@ -14,8 +14,38 @@ describe('MetricValue', () => {
     expect(m).not.toHaveProperty('value');
   });
 
-  it('never represents an unavailable metric as zero', () => {
-    const m = unavailable('NO_DATA');
-    expect(JSON.stringify(m)).not.toContain('"value"');
+  /**
+   * Finding 14a: this previously asserted only that `stringify` lacked the literal `'"value"'`,
+   * which a renamed field would defeat. FR-24's real requirement is that an unavailable metric
+   * has NO NUMERIC FIELD ANYWHERE after a JSON round-trip — that is what makes rendering an
+   * absent RSSI as `0` structurally impossible — and that the guard still reports false on the
+   * other side of serialization.
+   */
+  it('has no numeric field at all after a JSON round-trip', () => {
+    const parsed = JSON.parse(JSON.stringify(unavailable('NO_DATA'))) as Record<string, unknown>;
+    const numericFields = Object.entries(parsed).filter(([, v]) => typeof v === 'number');
+    expect(numericFields).toEqual([]);
+  });
+
+  it('stays unavailable after a JSON round-trip', () => {
+    const parsed = JSON.parse(JSON.stringify(unavailable('NO_DATA')));
+    expect(isAvailable(parsed)).toBe(false);
+    expect(parsed).not.toHaveProperty('value');
+  });
+
+  it.each(['OID_NOT_SUPPORTED', 'NO_DATA', 'UPSTREAM_UNAVAILABLE', 'NOT_COLLECTED'] as const)(
+    'preserves the reason %s across a round-trip without inventing a value',
+    (reason) => {
+      const parsed = JSON.parse(JSON.stringify(unavailable(reason))) as Record<string, unknown>;
+      expect(parsed.reason).toBe(reason);
+      expect(Object.values(parsed).some((v) => typeof v === 'number')).toBe(false);
+    }
+  );
+
+  it('keeps a legitimate zero reading available and distinguishable from absence', () => {
+    // The inverse risk: a real 0 (e.g. zero errored packets) must NOT be confused with absence.
+    const parsed = JSON.parse(JSON.stringify(available(0)));
+    expect(isAvailable(parsed)).toBe(true);
+    expect(parsed.value).toBe(0);
   });
 });

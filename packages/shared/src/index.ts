@@ -1,4 +1,6 @@
-export const SHARED_PACKAGE_VERSION = '0.1.0';
+// Finding 19: `SHARED_PACKAGE_VERSION` was removed. It duplicated package.json's version and
+// drifted from it silently; a consumer that needs a version reads its own manifest (see the
+// BFF's `version.ts`), so there is exactly one source of truth per package.
 
 export * from './errors/codes.js';
 export * from './types/envelope.js';
