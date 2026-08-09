@@ -229,6 +229,23 @@ describe('createErrorHandler — framework body-parser errors (finding 1)', () =
     expect(records.filter((r) => r.level === 'WARN')).toHaveLength(0);
   });
 
+  it('answers 400 VALIDATION_ERROR at WARN for querystring.parse.rangeError', async () => {
+    // Client-reachable and client-caused (an over-long / over-deep query string). Left at
+    // 500/ERROR it lets any unauthenticated caller inflate the ERROR-rate signal — the exact
+    // defect finding 1 closed for body errors.
+    const { logger, records } = capturingLogger();
+    const rangeError = Object.assign(new Error('too many parameters'), {
+      status: 400,
+      type: 'querystring.parse.rangeError'
+    });
+    const res = await request(throwingApp(logger, rangeError)).get('/boom');
+    expect(res.status).toBe(400);
+    expect(res.body.errors[0].code).toBe('VALIDATION_ERROR');
+    expectFailureEnvelope(res.body);
+    expect(records.filter((r) => r.level === 'ERROR')).toHaveLength(0);
+    expect(records.some((r) => r.level === 'WARN')).toBe(true);
+  });
+
   it('keeps the opaque 500 for an allowlisted type with NO usable status', async () => {
     const { logger } = capturingLogger();
     const noStatus = Object.assign(new Error('no status'), { type: 'entity.parse.failed' });
@@ -360,9 +377,13 @@ describe('createErrorHandler — cannot crash into Express default handler', () 
    *  - `res.status()` / `res.json()` must never be CALLED once headers are sent. Calling them is
    *    the actual defect (Express warns, and any header write throws ERR_HTTP_HEADERS_SENT);
    *    spying on them targets the decision rather than the downstream symptom.
-   *  - the failure must still be logged, with the distinct committed-response message. The
-   *    fallback writes no log at all, so if the guard is removed and only the fallback catches
-   *    the fault, this assertion fails.
+   *  - the failure must be logged through the LOGGER with the distinct committed-response
+   *    message. This is the oracle that separates the two paths, and it no longer relies on the
+   *    fallback being silent (finding 5 made the fallback emit a best-effort stderr line, so
+   *    "no log at all" is no longer a valid discriminator). The fallback NEVER calls the logger
+   *    — it cannot, the logger is what may have failed — so asserting exactly one logger ERROR
+   *    record bearing this specific message still fails if the guard is removed and only the
+   *    fallback runs.
    */
   it('detects an already-committed response and never touches status/json again', async () => {
     const { logger, records } = capturingLogger();
@@ -394,12 +415,15 @@ describe('createErrorHandler — cannot crash into Express default handler', () 
     expect(res.text).not.toContain('INTERNAL_ERROR');
     expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
     expect(res.text).not.toMatch(/at\s+\S+:\d+:\d+/);
-    // Recognised on the normal path: the fallback emits no log, so this pins the guard itself.
+    // Recognised on the NORMAL path: the fallback never calls the logger, so exactly one logger
+    // ERROR record carrying this specific message pins the guard itself, not the fallback.
     expect(
       records.filter(
         (r) => r.level === 'ERROR' && r.message === 'unhandled error after response was committed'
       )
     ).toHaveLength(1);
+    // And no other logger record was emitted, so the decision was made once, on one path.
+    expect(records).toHaveLength(1);
   });
 
   /**
@@ -442,5 +466,206 @@ describe('createErrorHandler — cannot crash into Express default handler', () 
     expect(attempted).toEqual([]);
     expect(res.text).not.toContain('INTERNAL_ERROR');
     expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+  });
+});
+
+/**
+ * Finding 5 — the double-fault fallback must not be SILENT.
+ *
+ * The realistic trigger is not a hostile getter: it is the log sink failing, which is the one
+ * condition a logging call is most likely to fail under (`process.stdout.write` throws EPIPE when
+ * a container's stdout pipe closes). Before this fix, a genuine 500-class fault whose log write
+ * threw produced a correct, safe 500 and was recorded NOWHERE — the ERROR rate stayed flat while
+ * requests failed, which is worse than a visible leak because it cannot be alerted on.
+ *
+ * The fallback must therefore emit a best-effort record on a channel that does NOT depend on the
+ * failed logger (raw stderr, its own try/catch), and must carry the real correlation id so the
+ * one client-visible failure is traceable — without introducing any operation that can throw at
+ * fault time.
+ */
+describe('createErrorHandler — the fallback is observable (finding 5)', () => {
+  /** Captures raw stderr writes for the duration of one call. */
+  async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; stderr: string }> {
+    const original = process.stderr.write.bind(process.stderr);
+    let captured = '';
+    process.stderr.write = ((chunk: unknown) => {
+      captured += String(chunk);
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      const result = await fn();
+      return { result, stderr: captured };
+    } finally {
+      process.stderr.write = original;
+    }
+  }
+
+  const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+  it('records the fault on stderr and carries the real requestId when the logger throws', async () => {
+    const { logger } = capturingLogger();
+    const hostile: Logger = {
+      ...logger,
+      error: () => {
+        throw new Error('EPIPE');
+      }
+    };
+    const { result: res, stderr } = await captureStderr(() =>
+      request(throwingApp(hostile, new Error('SELECT token FROM sessions'))).get('/boom')
+    );
+
+    // (i) the client still gets a safe 500 with no leak
+    expect(res.status).toBe(500);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    const body = JSON.parse(res.text) as {
+      success?: unknown;
+      errors?: { code?: string; message?: string }[];
+      meta?: { requestId?: string };
+    };
+    expect(body.success).toBe(false);
+    expect(body.errors?.[0]?.code).toBe('INTERNAL_ERROR');
+    expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+    expect(res.text).not.toMatch(/at\s+\S+:\d+:\d+/);
+    expect(res.text).not.toContain('sessions');
+    expect(res.text).not.toContain('EPIPE');
+
+    // (ii) a best-effort record reached stderr — the fault is no longer invisible
+    expect(stderr).toContain('error-handler double fault');
+    // It must be a single line so a log collector can parse it.
+    expect(stderr.trimEnd().split('\n')).toHaveLength(1);
+    // It must carry nothing from the error itself — no message, no stack, no path.
+    expect(stderr).not.toContain('sessions');
+    expect(stderr).not.toContain('EPIPE');
+    expect(stderr).not.toMatch(/at\s+\S+:\d+:\d+/);
+    expect(stderr).not.toMatch(/node_modules|packages[\\/]bff|[A-Za-z]:\\/);
+
+    // (iii) the real requestId appears in BOTH the envelope and the stderr record
+    const requestId = body.meta?.requestId;
+    expect(requestId).toMatch(UUID);
+    expect(requestId).toBe(res.headers['x-correlation-id']);
+    expect(stderr).toContain(requestId!);
+  });
+
+  /**
+   * The requestId is carried by CONCATENATION, with no escaping and no serializer — that is what
+   * makes the fallback unable to throw. The safety of that choice rests entirely on the value
+   * being PRE-VALIDATED, so these cases attack the validation itself, not the concatenation:
+   * each value below is a plain `string` that would survive a bare `typeof` check and, if
+   * concatenated, would break out of the JSON envelope or the stderr line. The oracle is that the
+   * envelope stays exactly one well-formed JSON object with `requestId` === the constant, and the
+   * hostile text never appears on the wire or on stderr.
+   */
+  const NON_UUID_IDS = [
+    '","leak":"pwned',
+    'a"}}\n{"injected":true',
+    'not-a-uuid',
+    '11111111-2222-3333-4444-55555555555', // 35 chars — one short, boundary case
+    '11111111-2222-3333-4444-5555555555555', // 37 chars — one over
+    'ZZZZZZZZ-2222-3333-4444-555555555555', // right shape, non-hex
+    '11111111-2222-3333-4444-555555555555 ', // trailing space
+    ''
+  ] as const;
+
+  for (const hostileId of NON_UUID_IDS) {
+    it(`falls back to the constant requestId for the non-UUID id ${JSON.stringify(hostileId)}`, async () => {
+      const { logger } = capturingLogger();
+      const hostile: Logger = {
+        ...logger,
+        error: () => {
+          throw new Error('EPIPE');
+        }
+      };
+      const app = express();
+      app.get('/boom', (_req, res) => {
+        res.locals.correlationId = hostileId;
+        throw new Error('inner');
+      });
+      app.use(notFoundHandler);
+      app.use(createErrorHandler(hostile));
+
+      const { result: res, stderr } = await captureStderr(() => request(app).get('/boom'));
+      expect(res.status).toBe(500);
+      // Exactly one well-formed JSON object — an injected value would produce a parse error or a
+      // second key.
+      const body = JSON.parse(res.text) as {
+        meta?: { requestId?: string };
+        leak?: unknown;
+        injected?: unknown;
+      };
+      expect(body.meta?.requestId).toBe('unknown');
+      expect(body.leak).toBeUndefined();
+      expect(body.injected).toBeUndefined();
+      expect(res.text).not.toContain('pwned');
+      expect(res.text).not.toContain('injected');
+      // The stderr record must stay one line and must not carry the hostile text either.
+      expect(stderr).toContain('error-handler double fault');
+      expect(stderr).toContain('"requestId":"unknown"');
+      expect(stderr.trimEnd().split('\n')).toHaveLength(1);
+      expect(stderr).not.toContain('pwned');
+      expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+    });
+  }
+
+  it('falls back to the constant requestId when reading the correlation id throws', async () => {
+    const { logger } = capturingLogger();
+    const hostile: Logger = {
+      ...logger,
+      error: () => {
+        throw new Error('EPIPE');
+      }
+    };
+    const app = express();
+    app.get('/boom', (_req, res) => {
+      Object.defineProperty(res.locals, 'correlationId', {
+        configurable: true,
+        get: () => {
+          throw new Error('hostile getter');
+        }
+      });
+      throw new Error('inner');
+    });
+    app.use(notFoundHandler);
+    app.use(createErrorHandler(hostile));
+
+    const { result: res, stderr } = await captureStderr(() => request(app).get('/boom'));
+    expect(res.status).toBe(500);
+    const body = JSON.parse(res.text) as { meta?: { requestId?: string } };
+    expect(body.meta?.requestId).toBe('unknown');
+    expect(stderr).toContain('error-handler double fault');
+    expect(res.text).not.toContain('hostile getter');
+    expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+  });
+
+  it('still answers safely when BOTH the logger and stderr throw (no recursion, no escape)', async () => {
+    const { logger } = capturingLogger();
+    const hostile: Logger = {
+      ...logger,
+      error: () => {
+        throw new Error('EPIPE');
+      }
+    };
+    const original = process.stderr.write.bind(process.stderr);
+    process.stderr.write = (() => {
+      throw new Error('EPIPE on stderr too');
+    }) as typeof process.stderr.write;
+    let res;
+    try {
+      res = await request(throwingApp(hostile, new Error('inner'))).get('/boom');
+    } finally {
+      process.stderr.write = original;
+    }
+    expect(res.status).toBe(500);
+    expect(res.body.errors[0].code).toBe('INTERNAL_ERROR');
+    expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+  });
+
+  it('emits no stderr line on the healthy path (the record is last-resort only)', async () => {
+    const { logger, records } = capturingLogger();
+    const { result: res, stderr } = await captureStderr(() =>
+      request(throwingApp(logger, new Error('inner'))).get('/boom')
+    );
+    expect(res.status).toBe(500);
+    expect(records.filter((r) => r.level === 'ERROR')).toHaveLength(1);
+    expect(stderr).not.toContain('error-handler double fault');
   });
 });

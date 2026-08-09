@@ -107,6 +107,11 @@ const FRAMEWORK_CLIENT_ERRORS: ReadonlyMap<
       code: 'PAYLOAD_TOO_LARGE',
       message: 'Request contains too many parameters.'
     },
+    'querystring.parse.rangeError': {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Request query string is not valid.'
+    },
     'charset.unsupported': {
       status: 415,
       code: 'UNSUPPORTED_MEDIA_TYPE',
@@ -144,16 +149,83 @@ function classifyFrameworkError(
 /**
  * Last-resort response written when the normal envelope path itself fails (test finding 4).
  *
- * Hardcoded, dependency-free, and built from string literals only — no logger, no serializer, no
- * value taken from the error. It exists so a throw inside the error handler can never escape to
- * Express's default handler, which answers an HTML page carrying a stack trace and absolute
- * filesystem paths. An error boundary that can crash is not a boundary.
+ * Dependency-free and built from string literals plus a PRE-VALIDATED UUID only — no logger, no
+ * serializer, no value taken from the error. It exists so a throw inside the error handler can
+ * never escape to Express's default handler, which answers an HTML page carrying a stack trace and
+ * absolute filesystem paths. An error boundary that can crash is not a boundary.
+ *
+ * "Dependency-free" must not mean "silent" (test finding 5): it also emits one best-effort record
+ * on raw stderr, independently contained, so a fault whose log write failed is still recorded
+ * somewhere. See `writeLastResortRecord`.
  */
-const MINIMAL_FALLBACK_BODY =
+const FALLBACK_BODY_PREFIX =
   '{"success":false,"errors":[{"code":"INTERNAL_ERROR",' +
-  '"message":"An internal error occurred."}],"meta":{"requestId":"unknown"}}';
+  '"message":"An internal error occurred."}],"meta":{"requestId":"';
+const FALLBACK_BODY_SUFFIX = '"}}';
+const UNKNOWN_REQUEST_ID = 'unknown';
+
+/**
+ * A correlation id is only carried into the fallback if it matches this EXACTLY (test finding 5).
+ *
+ * `res.locals.correlationId` is server-generated (`correlationId.ts` assigns `randomUUID()`
+ * unconditionally, and a client header is stored separately), so in practice it is always a UUID.
+ * The pattern is nevertheless applied at fault time because the fallback must be safe even when
+ * `res.locals` has been corrupted by whatever is already going wrong: a pre-validated UUID is
+ * JSON-safe and header-safe by construction, so the body can be built by plain string
+ * concatenation with NO serialization, escaping, or `String()` coercion — the operations that
+ * could themselves throw. Anything else degrades to the constant.
+ */
+const PREVALIDATED_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * Reads the correlation id and returns it ONLY if it is a pre-validated UUID string.
+ *
+ * `typeof` cannot throw, and `RegExp.test` on a primitive string cannot throw. The property read
+ * itself is the sole operation that could (an exotic getter), so it is contained — this function
+ * is total and returns the constant on every unhappy path.
+ */
+function prevalidatedRequestId(res: Parameters<ErrorRequestHandler>[2]): string {
+  try {
+    const raw: unknown = res.locals?.correlationId;
+    if (typeof raw === 'string' && PREVALIDATED_UUID.test(raw)) return raw;
+  } catch {
+    /* fall through to the constant */
+  }
+  return UNKNOWN_REQUEST_ID;
+}
+
+/**
+ * Best-effort last-resort record of a double fault (test finding 5).
+ *
+ * The fallback used to write NOTHING, which made a real incident invisible: a genuine 500-class
+ * fault whose `logger.error` call threw (EPIPE on stdout — routine for a container whose log pipe
+ * closes) produced a correct, safe 500 while the ERROR rate stayed flat. A leak is visible; this
+ * was not, which is worse operationally.
+ *
+ * It deliberately does NOT go through the logger — the logger is what may have just failed — and
+ * it cannot throw or recurse:
+ *  - the line is a concatenation of module-level literals plus a pre-validated UUID; there is no
+ *    serializer, no value from the error, and nothing derived from client input;
+ *  - the raw `process.stderr.write` is wrapped in its own `try/catch`, so a second EPIPE is
+ *    swallowed rather than propagated;
+ *  - it calls nothing that can re-enter the error handler, so no recursion is possible.
+ */
+function writeLastResortRecord(requestId: string): void {
+  try {
+    process.stderr.write(
+      '{"level":"ERROR","service":"bff","message":"error-handler double fault",' +
+        '"context":{"requestId":"' +
+        requestId +
+        '"}}\n'
+    );
+  } catch {
+    // stderr is gone too. There is no further channel and re-throwing would defeat the boundary.
+  }
+}
 
 function writeMinimalFallback(res: Parameters<ErrorRequestHandler>[2]): void {
+  const requestId = prevalidatedRequestId(res);
+  writeLastResortRecord(requestId);
   try {
     if (res.headersSent) {
       // The status line and headers are already on the wire; appending a second body would
@@ -163,7 +235,7 @@ function writeMinimalFallback(res: Parameters<ErrorRequestHandler>[2]): void {
     }
     res.statusCode = 500;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
-    res.end(MINIMAL_FALLBACK_BODY);
+    res.end(FALLBACK_BODY_PREFIX + requestId + FALLBACK_BODY_SUFFIX);
   } catch {
     // Nothing further is safe or useful. Destroy the socket rather than re-throw into Express.
     try {

@@ -206,7 +206,23 @@ function writeLine(record: Record<string, unknown>): void {
       context: '[unserializable]'
     });
   }
-  process.stdout.write(`${line}\n`);
+  // `process.stdout.write` THROWS on EPIPE (test finding 5) — a container whose stdout pipe is
+  // closed, a detached log collector, a full pipe buffer. Uncontained, that turned every
+  // `logger.error(...)` into a throw INTO ITS CALLER, so a log failure became a second fault at
+  // whichever call site was reporting the first one. The error boundary's own fallback only
+  // covered the symptom; the cause is contained here, so no caller can ever be broken by the log
+  // transport. Containment is only justified because it is not silence: the record is retried on
+  // stderr (a different fd, commonly still open) before being dropped.
+  try {
+    process.stdout.write(`${line}\n`);
+  } catch {
+    try {
+      process.stderr.write(`${line}\n`);
+    } catch {
+      // Both channels are gone. There is no third place to record this and re-throwing would
+      // corrupt the caller, so the record is dropped deliberately.
+    }
+  }
 }
 
 export function createLogger(config: Pick<Config, 'logLevel'>, service = 'bff'): Logger {

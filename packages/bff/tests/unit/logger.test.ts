@@ -304,6 +304,68 @@ describe('createLogger', () => {
     return lines.map((l) => JSON.parse(l) as Record<string, unknown>);
   }
 
+  /**
+   * Finding 5, root cause. `process.stdout.write` throws on EPIPE (a container whose stdout pipe
+   * closes, a detached log collector, a full pipe buffer). An uncontained write therefore made
+   * `logger.error` throw INTO ITS CALLER — turning every call site into a potential double fault.
+   * Containment here fixes the cause; the error handler's fallback only covers the symptom.
+   */
+  it('does not throw into the caller when stdout.write throws (EPIPE)', () => {
+    const outOriginal = process.stdout.write;
+    const errOriginal = process.stderr.write;
+    const fallback: string[] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = () => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = (chunk: string) => {
+      fallback.push(String(chunk));
+      return true;
+    };
+    try {
+      const log = createLogger({ logLevel: 'debug' });
+      expect(() => log.error('real server fault', { requestId: 'CID-1' })).not.toThrow();
+      expect(() => log.warn('w')).not.toThrow();
+      expect(() => log.info('i')).not.toThrow();
+      expect(() => log.debug('d')).not.toThrow();
+      expect(() =>
+        log.audit({
+          actor: 'a',
+          action: 'b',
+          target: 'c',
+          outcome: 'failure',
+          correlationId: 'CID-1'
+        })
+      ).not.toThrow();
+    } finally {
+      process.stdout.write = outOriginal;
+      process.stderr.write = errOriginal;
+    }
+    // Best effort, not silence: the record is retried on stderr rather than dropped.
+    expect(fallback.join('')).toContain('real server fault');
+    expect(fallback.join('')).toContain('CID-1');
+  });
+
+  it('does not throw into the caller when BOTH stdout and stderr throw', () => {
+    const outOriginal = process.stdout.write;
+    const errOriginal = process.stderr.write;
+    const boom = () => {
+      throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stdout as any).write = boom;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (process.stderr as any).write = boom;
+    try {
+      const log = createLogger({ logLevel: 'debug' });
+      expect(() => log.error('fault', { a: 1 })).not.toThrow();
+    } finally {
+      process.stdout.write = outOriginal;
+      process.stderr.write = errOriginal;
+    }
+  });
+
   it('emits structured JSON with the required fields', () => {
     const [entry] = capture((log) => log.info('hello', { userId: 'u1' }));
     expect(entry.level).toBe('INFO');
