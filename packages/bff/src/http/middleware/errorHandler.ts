@@ -53,51 +53,72 @@ export const notFoundHandler: RequestHandler = (_req, res) => {
  *
  * Only the CODE and STATUS come from the error; the message is a fixed string per entry, so no
  * framework text, offset, stack, or internal path can reach the wire.
+ *
+ * PROTOTYPE SAFETY (test finding 4). The table is a `Map`, NOT an object literal. As an object
+ * literal it inherited from `Object.prototype`, so a `type` of `'constructor'`, `'toString'`,
+ * `'__proto__'`, `'valueOf'`, `'hasOwnProperty'` (and every other inherited member) resolved to
+ * an inherited function instead of `undefined`. That bypassed the `mapped === undefined`
+ * fail-closed guard entirely and fed `res.status(undefined)`, which threw INSIDE the error
+ * handler — so Express's default handler answered with an HTML stack trace and absolute
+ * filesystem paths, defeating the whole no-leak guarantee.
+ *
+ * A `Map` was chosen over the two alternatives because it makes the failure UNREPRESENTABLE
+ * rather than merely guarded: `Map.prototype.get` consults only own entries, by specification,
+ * with no prototype chain to reach. `Object.create(null)` closes the same hole but is one
+ * refactor away from silently reopening — any future edit that writes it back as a literal
+ * (`= { ... }`), spreads it, or clones it with `{ ...table }` restores the prototype and nothing
+ * fails loudly. An `Object.hasOwn()` guard is weaker still: it leaves the unsafe lookup in place
+ * and relies on a caller remembering to check, which is exactly the vigilance this codebase has
+ * already lost five times. With a `Map`, forgetting the safety is a type error, not a silent
+ * regression: there is no index-access syntax to reach for.
  */
-const FRAMEWORK_CLIENT_ERRORS: Readonly<
-  Record<string, { readonly status: number; readonly code: ErrorCode; readonly message: string }>
-> = {
-  'entity.too.large': {
-    status: 413,
-    code: 'PAYLOAD_TOO_LARGE',
-    message: 'Request body exceeds the maximum allowed size.'
-  },
-  'entity.parse.failed': {
-    status: 400,
-    code: 'VALIDATION_ERROR',
-    message: 'Request body is not valid JSON.'
-  },
-  'entity.verify.failed': {
-    status: 400,
-    code: 'VALIDATION_ERROR',
-    message: 'Request body failed verification.'
-  },
-  'request.aborted': {
-    status: 400,
-    code: 'VALIDATION_ERROR',
-    message: 'Request was aborted before the body was received.'
-  },
-  'request.size.invalid': {
-    status: 400,
-    code: 'VALIDATION_ERROR',
-    message: 'Request body size did not match the Content-Length header.'
-  },
-  'parameters.too.many': {
-    status: 413,
-    code: 'PAYLOAD_TOO_LARGE',
-    message: 'Request contains too many parameters.'
-  },
-  'charset.unsupported': {
-    status: 415,
-    code: 'UNSUPPORTED_MEDIA_TYPE',
-    message: 'Request charset is not supported.'
-  },
-  'encoding.unsupported': {
-    status: 415,
-    code: 'UNSUPPORTED_MEDIA_TYPE',
-    message: 'Request content encoding is not supported.'
-  }
-};
+const FRAMEWORK_CLIENT_ERRORS: ReadonlyMap<
+  string,
+  { readonly status: number; readonly code: ErrorCode; readonly message: string }
+> = new Map(
+  Object.entries({
+    'entity.too.large': {
+      status: 413,
+      code: 'PAYLOAD_TOO_LARGE',
+      message: 'Request body exceeds the maximum allowed size.'
+    },
+    'entity.parse.failed': {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Request body is not valid JSON.'
+    },
+    'entity.verify.failed': {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Request body failed verification.'
+    },
+    'request.aborted': {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Request was aborted before the body was received.'
+    },
+    'request.size.invalid': {
+      status: 400,
+      code: 'VALIDATION_ERROR',
+      message: 'Request body size did not match the Content-Length header.'
+    },
+    'parameters.too.many': {
+      status: 413,
+      code: 'PAYLOAD_TOO_LARGE',
+      message: 'Request contains too many parameters.'
+    },
+    'charset.unsupported': {
+      status: 415,
+      code: 'UNSUPPORTED_MEDIA_TYPE',
+      message: 'Request charset is not supported.'
+    },
+    'encoding.unsupported': {
+      status: 415,
+      code: 'UNSUPPORTED_MEDIA_TYPE',
+      message: 'Request content encoding is not supported.'
+    }
+  } as const)
+);
 
 /**
  * Classifies a thrown value as a recognised framework client error, or `undefined`.
@@ -112,7 +133,8 @@ function classifyFrameworkError(
   if (typeof err !== 'object' || err === null) return undefined;
   const candidate = err as { type?: unknown; status?: unknown; statusCode?: unknown };
   if (typeof candidate.type !== 'string') return undefined;
-  const mapped = FRAMEWORK_CLIENT_ERRORS[candidate.type];
+  // `Map.get` consults own entries only — no prototype chain to walk (finding 4).
+  const mapped = FRAMEWORK_CLIENT_ERRORS.get(candidate.type);
   if (mapped === undefined) return undefined;
   const rawStatus = typeof candidate.status === 'number' ? candidate.status : candidate.statusCode;
   if (typeof rawStatus !== 'number' || rawStatus < 400 || rawStatus > 499) return undefined;
@@ -120,49 +142,111 @@ function classifyFrameworkError(
 }
 
 /**
+ * Last-resort response written when the normal envelope path itself fails (test finding 4).
+ *
+ * Hardcoded, dependency-free, and built from string literals only — no logger, no serializer, no
+ * value taken from the error. It exists so a throw inside the error handler can never escape to
+ * Express's default handler, which answers an HTML page carrying a stack trace and absolute
+ * filesystem paths. An error boundary that can crash is not a boundary.
+ */
+const MINIMAL_FALLBACK_BODY =
+  '{"success":false,"errors":[{"code":"INTERNAL_ERROR",' +
+  '"message":"An internal error occurred."}],"meta":{"requestId":"unknown"}}';
+
+function writeMinimalFallback(res: Parameters<ErrorRequestHandler>[2]): void {
+  try {
+    if (res.headersSent) {
+      // The status line and headers are already on the wire; appending a second body would
+      // corrupt the response. End the stream instead.
+      res.end();
+      return;
+    }
+    res.statusCode = 500;
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    res.end(MINIMAL_FALLBACK_BODY);
+  } catch {
+    // Nothing further is safe or useful. Destroy the socket rather than re-throw into Express.
+    try {
+      res.destroy();
+    } catch {
+      /* the connection is already gone */
+    }
+  }
+}
+
+/**
  * Centralized error boundary. Known `AppError`s map to their declared status and code;
  * recognised framework client errors map to their own 4xx (see `FRAMEWORK_CLIENT_ERRORS`);
  * anything else is logged server-side and answered with a safe summary — never a stack
  * trace, internal path, or upstream error body.
+ *
+ * DOUBLE-FAULT GUARD (test finding 4). The whole classification path runs inside a try/catch and
+ * an already-committed response is detected before any write, so no throw originating in this
+ * handler can reach Express's default handler — which would answer HTML carrying a stack trace
+ * and absolute filesystem paths. An error boundary that can itself crash is not a boundary.
  */
 export function createErrorHandler(logger: Logger): ErrorRequestHandler {
-  return (err, _req, res, _next) => {
-    const requestId = String(res.locals.correlationId ?? 'unknown');
-    if (err instanceof AppError) {
-      const body: ApiFailure = {
-        success: false,
-        errors: [{ code: err.code, message: err.message, ...(err.field ? { field: err.field } : {}) }],
-        meta: { requestId }
-      };
-      if (err.status >= 500) logger.error('request failed', { requestId, code: err.code });
-      else logger.info('request rejected', { requestId, code: err.code });
-      res.status(err.status).json(body);
-      return;
+  return (err, req, res, next) => {
+    try {
+      handleError(logger, err, res);
+    } catch {
+      // DOUBLE FAULT: the handler itself threw. Do not delegate to `next(err)` — Express's
+      // default handler emits HTML with a stack trace and absolute paths. Answer minimally.
+      writeMinimalFallback(res);
     }
-    const framework = classifyFrameworkError(err);
-    if (framework !== undefined) {
-      const body: ApiFailure = {
-        success: false,
-        errors: [{ code: framework.code, message: framework.message }],
-        meta: { requestId }
-      };
-      // A client sending a bad body is not a server fault, so this must NOT be ERROR — it would
-      // pollute the alerting signal. WARN keeps it visible on a dashboard without paging.
-      logger.warn('request rejected by body parser', {
-        requestId,
-        code: framework.code,
-        status: framework.status
-      });
-      res.status(framework.status).json(body);
-      return;
-    }
-    // Unknown errors: log server-side, return a safe summary (no stack, no internals).
-    logger.error('unhandled error', { requestId, name: (err as Error)?.name });
+    // `req` and `next` are part of the Express error-middleware signature (4 arity is what marks
+    // it as an error handler) and are deliberately unused beyond that.
+    void req;
+    void next;
+  };
+}
+
+/**
+ * The normal classification and response path. Extracted so `createErrorHandler` can wrap it in
+ * a single try/catch — every `return` here is a fully-written response.
+ */
+function handleError(logger: Logger, err: unknown, res: Parameters<ErrorRequestHandler>[2]): void {
+  const requestId = String(res.locals.correlationId ?? 'unknown');
+  if (res.headersSent) {
+    // Response already committed: record it, but never write a second body.
+    logger.error('unhandled error after response was committed', { requestId });
+    res.end();
+    return;
+  }
+  if (err instanceof AppError) {
     const body: ApiFailure = {
       success: false,
-      errors: [{ code: 'INTERNAL_ERROR', message: 'An internal error occurred.' }],
+      errors: [{ code: err.code, message: err.message, ...(err.field ? { field: err.field } : {}) }],
       meta: { requestId }
     };
-    res.status(500).json(body);
+    if (err.status >= 500) logger.error('request failed', { requestId, code: err.code });
+    else logger.info('request rejected', { requestId, code: err.code });
+    res.status(err.status).json(body);
+    return;
+  }
+  const framework = classifyFrameworkError(err);
+  if (framework !== undefined) {
+    const body: ApiFailure = {
+      success: false,
+      errors: [{ code: framework.code, message: framework.message }],
+      meta: { requestId }
+    };
+    // A client sending a bad body is not a server fault, so this must NOT be ERROR — it would
+    // pollute the alerting signal. WARN keeps it visible on a dashboard without paging.
+    logger.warn('request rejected by body parser', {
+      requestId,
+      code: framework.code,
+      status: framework.status
+    });
+    res.status(framework.status).json(body);
+    return;
+  }
+  // Unknown errors: log server-side, return a safe summary (no stack, no internals).
+  logger.error('unhandled error', { requestId, name: (err as Error)?.name });
+  const body: ApiFailure = {
+    success: false,
+    errors: [{ code: 'INTERNAL_ERROR', message: 'An internal error occurred.' }],
+    meta: { requestId }
   };
+  res.status(500).json(body);
 }

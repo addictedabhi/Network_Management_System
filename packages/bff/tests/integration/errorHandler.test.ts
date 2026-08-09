@@ -237,3 +237,210 @@ describe('createErrorHandler — framework body-parser errors (finding 1)', () =
     expect(res.body.errors[0].code).toBe('INTERNAL_ERROR');
   });
 });
+
+/**
+ * Finding 4 — the LOOKUP MECHANISM axis, not more string values.
+ *
+ * The defect was not "one more unrecognised type": it was that an object-literal table is
+ * reachable through `Object.prototype`, so a whole CLASS of `type` values returned an inherited
+ * member instead of `undefined` and bypassed the `mapped === undefined` fail-closed guard. These
+ * cases enumerate that class (inherited data + accessor + function members, and `__proto__`,
+ * whose `get` is itself on `Object.prototype`), plus both controls so a table that stopped
+ * matching anything at all would also be caught.
+ */
+describe('createErrorHandler — allowlist lookup mechanism (finding 4)', () => {
+  const PROTOTYPE_KEYS = [
+    'constructor',
+    'toString',
+    '__proto__',
+    'valueOf',
+    'hasOwnProperty',
+    'isPrototypeOf',
+    'propertyIsEnumerable',
+    'toLocaleString'
+  ] as const;
+
+  for (const key of PROTOTYPE_KEYS) {
+    it(`treats the Object.prototype key '${key}' as unrecognised and fails closed to 500`, async () => {
+      const { logger, records } = capturingLogger();
+      const proto = Object.assign(new Error('boom'), { type: key, status: 400 });
+      const res = await request(throwingApp(logger, proto)).get('/boom');
+
+      expect(res.status).toBe(500);
+      expect(res.body.errors[0].code).toBe('INTERNAL_ERROR');
+      expect(res.body.errors[0].message).toBe('An internal error occurred.');
+      expectFailureEnvelope(res.body);
+      // The crash signature: Express's default handler answers HTML, not our envelope.
+      expect(res.headers['content-type']).toMatch(/application\/json/);
+      expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+      // A genuine unclassified failure belongs at ERROR, never recorded as a client-fault WARN.
+      expect(records.some((r) => r.level === 'ERROR')).toBe(true);
+      expect(records.filter((r) => r.level === 'WARN')).toHaveLength(0);
+    });
+  }
+
+  it('positive control: a genuine allowlisted own key still classifies', async () => {
+    const { logger, records } = capturingLogger();
+    const real = Object.assign(new Error('too big'), { type: 'entity.too.large', status: 413 });
+    const res = await request(throwingApp(logger, real)).get('/boom');
+    expect(res.status).toBe(413);
+    expect(res.body.errors[0].code).toBe('PAYLOAD_TOO_LARGE');
+    expectFailureEnvelope(res.body);
+    expect(records.some((r) => r.level === 'WARN')).toBe(true);
+    expect(records.filter((r) => r.level === 'ERROR')).toHaveLength(0);
+  });
+
+  it('negative control: an ordinary unknown type still fails closed to 500', async () => {
+    const { logger } = capturingLogger();
+    const unknown = Object.assign(new Error('nope'), { type: 'totally.made.up', status: 400 });
+    const res = await request(throwingApp(logger, unknown)).get('/boom');
+    expect(res.status).toBe(500);
+    expect(res.body.errors[0].code).toBe('INTERNAL_ERROR');
+    expectFailureEnvelope(res.body);
+  });
+});
+
+/**
+ * Double-fault guard. An error boundary that can itself throw is not a boundary: the throw
+ * escapes to Express's default handler, which answers an HTML page carrying a stack trace and
+ * absolute filesystem paths. These cases force a throw from inside the handler and assert the
+ * wire still carries a safe response.
+ */
+describe('createErrorHandler — cannot crash into Express default handler', () => {
+  /** A response whose first body write always throws, simulating a serialization failure. */
+  function sabotagedApp(logger: Logger, sabotage: (res: express.Response) => void): Express {
+    const app = express();
+    app.use(correlationId);
+    app.get('/boom', (_req, res) => {
+      sabotage(res);
+      throw new Error('SELECT token FROM sessions WHERE id = 1');
+    });
+    app.use(notFoundHandler);
+    app.use(createErrorHandler(logger));
+    return app;
+  }
+
+  it('falls back to a safe minimal envelope when json() throws', async () => {
+    const { logger } = capturingLogger();
+    const res = await request(
+      sabotagedApp(logger, (r) => {
+        r.json = () => {
+          throw new Error('serialization exploded at /internal/path.ts:9:9');
+        };
+      })
+    ).get('/boom');
+
+    expect(res.status).toBe(500);
+    expect(res.headers['content-type']).toMatch(/application\/json/);
+    expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>|<\/html>/i);
+    expect(res.text).not.toMatch(/at\s+\S+:\d+:\d+/);
+    expect(res.text).not.toMatch(/node_modules|packages[\\/]bff|[A-Za-z]:\\/);
+    expect(res.text).not.toContain('sessions');
+    expect(res.text).not.toContain('serialization exploded');
+    const body = JSON.parse(res.text) as { success?: unknown; errors?: { code?: string }[] };
+    expect(body.success).toBe(false);
+    expect(body.errors?.[0]?.code).toBe('INTERNAL_ERROR');
+  });
+
+  it('falls back safely when the logger itself throws', async () => {
+    const { logger } = capturingLogger();
+    const hostile: Logger = { ...logger, error: () => { throw new Error('log sink down'); } };
+    const res = await request(throwingApp(hostile, new Error('inner'))).get('/boom');
+    expect(res.status).toBe(500);
+    expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+    expect(res.text).not.toMatch(/at\s+\S+:\d+:\d+/);
+    expect(res.text).not.toContain('log sink down');
+  });
+
+  /**
+   * The committed-response case must be recognised on the NORMAL path, not merely survived by
+   * the last-resort fallback. Both aims matter, so both are asserted against observable
+   * consequences that only the normal path produces:
+   *
+   *  - `res.status()` / `res.json()` must never be CALLED once headers are sent. Calling them is
+   *    the actual defect (Express warns, and any header write throws ERR_HTTP_HEADERS_SENT);
+   *    spying on them targets the decision rather than the downstream symptom.
+   *  - the failure must still be logged, with the distinct committed-response message. The
+   *    fallback writes no log at all, so if the guard is removed and only the fallback catches
+   *    the fault, this assertion fails.
+   */
+  it('detects an already-committed response and never touches status/json again', async () => {
+    const { logger, records } = capturingLogger();
+    const calls: string[] = [];
+    const app = express();
+    app.use(correlationId);
+    app.get('/boom', (_req, res) => {
+      res.status(200);
+      res.write('partial');
+      // Instrument AFTER the legitimate write so only error-handler calls are recorded.
+      res.status = () => {
+        calls.push('status');
+        return res;
+      };
+      res.json = () => {
+        calls.push('json');
+        return res;
+      };
+      throw new Error('after headers sent');
+    });
+    app.use(notFoundHandler);
+    app.use(createErrorHandler(logger));
+
+    const res = await request(app).get('/boom');
+
+    expect(res.headers['x-correlation-id']).toBeDefined();
+    // The load-bearing assertion: the handler made no write attempt on a committed response.
+    expect(calls).toEqual([]);
+    expect(res.text).not.toContain('INTERNAL_ERROR');
+    expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+    expect(res.text).not.toMatch(/at\s+\S+:\d+:\d+/);
+    // Recognised on the normal path: the fallback emits no log, so this pins the guard itself.
+    expect(
+      records.filter(
+        (r) => r.level === 'ERROR' && r.message === 'unhandled error after response was committed'
+      )
+    ).toHaveLength(1);
+  });
+
+  /**
+   * The fallback's own `headersSent` check. Forcing the normal path to throw AFTER headers are
+   * committed leaves the fallback as the only code left running; it must end the stream rather
+   * than attempt a status line and body that would throw ERR_HTTP_HEADERS_SENT.
+   */
+  it('fallback writes no headers or body when the response is already committed', async () => {
+    const { logger } = capturingLogger();
+    const attempted: string[] = [];
+    const hostile: Logger = {
+      ...logger,
+      error: () => {
+        throw new Error('log sink down');
+      }
+    };
+    const app = express();
+    app.use(correlationId);
+    app.get('/boom', (_req, res) => {
+      res.status(200);
+      res.write('partial');
+      const realSetHeader = res.setHeader.bind(res);
+      res.setHeader = ((name: string, value: never) => {
+        attempted.push(`setHeader:${name}`);
+        return realSetHeader(name, value);
+      }) as typeof res.setHeader;
+      Object.defineProperty(res, 'statusCode', {
+        configurable: true,
+        get: () => 200,
+        set: () => {
+          attempted.push('statusCode');
+        }
+      });
+      throw new Error('after headers sent');
+    });
+    app.use(notFoundHandler);
+    app.use(createErrorHandler(hostile));
+
+    const res = await request(app).get('/boom');
+    expect(attempted).toEqual([]);
+    expect(res.text).not.toContain('INTERNAL_ERROR');
+    expect(res.text).not.toMatch(/<!DOCTYPE html|<pre>/i);
+  });
+});
