@@ -87,6 +87,29 @@ function escapesIntoForbiddenDir(spec, forbiddenDirs) {
   return forbiddenDirs.find((dir) => segments.includes(dir) && segments.includes('..'));
 }
 
+/**
+ * Reduces a specifier node to its string value, or `undefined` when it cannot be proven.
+ *
+ * Only forms whose value is fixed at parse time are resolved:
+ *  - `StringLiteral` — `import('@nms/bff')`
+ *  - `TemplateLiteral` with NO expressions — ``import(`@nms/bff`)``. This is a valid ESM
+ *    specifier that resolves identically to the quoted form, so treating it as unresolvable
+ *    would be a false positive; `cooked` is the escape-processed value.
+ *
+ * Everything else returns `undefined` ON PURPOSE. A `TemplateLiteral` with expressions, a
+ * `BinaryExpression`, an `Identifier`, a call, a conditional — their targets depend on runtime
+ * state, so no static analysis can prove where the edge points. `cooked` can also legitimately
+ * be `undefined` for an invalid escape sequence, which is likewise unprovable.
+ */
+function staticStringValue(node) {
+  if (node.type === 'StringLiteral' && typeof node.value === 'string') return node.value;
+  if (node.type === 'TemplateLiteral' && node.expressions.length === 0) {
+    const cooked = node.quasis[0]?.value?.cooked;
+    if (typeof cooked === 'string') return cooked;
+  }
+  return undefined;
+}
+
 export function findViolations({ manifests, imports, errors = [] }) {
   const violations = [...errors];
 
@@ -101,14 +124,29 @@ export function findViolations({ manifests, imports, errors = [] }) {
   }
 
   for (const [file, specifiers] of Object.entries(imports)) {
+    // Packages with no forbidden-import rule are unconstrained. This scoping is what keeps the
+    // unresolvable-specifier rule below from firing across the whole monorepo: `bff` may use a
+    // dynamic `import()` freely, because there is no target it is forbidden to reach.
     const rule = RULES.find((r) => file.startsWith(`packages/${r.dir}/`));
     if (!rule) continue;
     const forbiddenDirs = rule.forbidden.map((p) => p.replace(/^@nms\//, ''));
     for (const spec of specifiers) {
-      const byName = rule.forbidden.find((p) => isPackageSpecifier(spec, p));
-      const byPath = escapesIntoForbiddenDir(spec, forbiddenDirs);
+      // FAIL CLOSED (finding 20): a specifier that cannot be reduced to a string is a module
+      // edge whose target is unknown. In a package that must never reach `@nms/bff`, an
+      // unverifiable edge is exactly what should stop the build — the guard cannot claim to
+      // have proved something it did not evaluate. The message is deliberately distinct from
+      // the forbidden-import message so the required developer action is unambiguous.
+      if (spec.kind === 'unresolvable') {
+        violations.push(
+          `${file} has an unresolvable module specifier (${spec.nodeType}), so it cannot be ` +
+            `proven safe — use a static string literal for imports in ${rule.pkg} (ADR 0001)`
+        );
+        continue;
+      }
+      const byName = rule.forbidden.find((p) => isPackageSpecifier(spec.value, p));
+      const byPath = escapesIntoForbiddenDir(spec.value, forbiddenDirs);
       if (byName || byPath) {
-        violations.push(`${file} must not import ${spec} (ADR 0001)`);
+        violations.push(`${file} must not import ${spec.value} (ADR 0001)`);
       }
     }
   }
@@ -126,11 +164,35 @@ export function extractSpecifiers(source, fileName = 'file.ts') {
   const ast = parseSource(source, fileName);
   const specifiers = [];
 
-  // `import x = require('y')` is TS-specific; Babel models the argument as a plain string.
-  const pushString = (node) => {
-    if (node && node.type === 'StringLiteral' && typeof node.value === 'string') {
-      specifiers.push(node.value);
+  /**
+   * Records one specifier node, classified.
+   *
+   * FINDING 20 — this function used to accept ONLY `StringLiteral` and silently drop every
+   * other node type, so ``import(`@nms/bff`)`` contributed nothing and the guard exited 0 with
+   * a live violation on disk. Silence is not an acceptable outcome for a node we reached:
+   * having found a real module-graph edge, the guard must either resolve it or declare that it
+   * could not. Anything unresolved becomes `{ kind: 'unresolvable' }`, which `findViolations`
+   * turns into a violation for any package carrying a forbidden-import rule.
+   *
+   * `required` distinguishes the two absent-node cases, which are NOT the same thing:
+   *  - `required: false` — no specifier node exists because the syntax has none. `export { x }`
+   *    with no `from` clause is a local re-export; there is no module edge to prove anything
+   *    about, so silence is correct.
+   *  - `required: true` — an import CONSTRUCT was found but its argument is missing, e.g. a
+   *    bare `require()`. That parses as valid JS, so it reached here rather than failing closed
+   *    at parse time. It cannot be resolved, therefore it is reported. (Found while auditing
+   *    every error path in this file against the invariant above; narrow, since a
+   *    zero-argument call cannot name a forbidden package — but the invariant admits no
+   *    silent skips, and "narrow today" is how the previous three fail-opens began.)
+   */
+  const pushSpecifier = (node, { required = false } = {}) => {
+    if (!node) {
+      if (required) specifiers.push({ kind: 'unresolvable', nodeType: 'MissingArgument' });
+      return;
     }
+    const value = staticStringValue(node);
+    if (value !== undefined) specifiers.push({ kind: 'resolved', value });
+    else specifiers.push({ kind: 'unresolvable', nodeType: node.type });
   };
 
   const visit = (node) => {
@@ -139,26 +201,29 @@ export function extractSpecifiers(source, fileName = 'file.ts') {
       case 'ImportDeclaration':
       case 'ExportAllDeclaration':
       case 'ExportNamedDeclaration':
-        // `export { x }` with no `from` clause has a null source — pushString ignores it.
-        pushString(node.source);
+        // `export { x }` with no `from` clause has a null source — no module edge exists.
+        pushSpecifier(node.source);
         break;
       case 'TSImportEqualsDeclaration':
         if (node.moduleReference?.type === 'TSExternalModuleReference') {
-          pushString(node.moduleReference.expression);
+          pushSpecifier(node.moduleReference.expression);
         }
         break;
       case 'TSImportType':
         // `type X = import('@nms/bff').Y` is still a module-graph edge at type level.
-        pushString(node.argument);
+        pushSpecifier(node.argument);
         break;
       case 'ImportExpression':
-        pushString(node.source ?? node.arguments?.[0]);
+        // An `import()` with no argument is a real import construct with nothing to resolve.
+        pushSpecifier(node.source ?? node.arguments?.[0], { required: true });
         break;
       case 'CallExpression': {
         const callee = node.callee;
         const isDynamicImport = callee?.type === 'Import';
         const isRequire = callee?.type === 'Identifier' && callee.name === 'require';
-        if (isDynamicImport || isRequire) pushString(node.arguments?.[0]);
+        if (isDynamicImport || isRequire) {
+          pushSpecifier(node.arguments?.[0], { required: true });
+        }
         break;
       }
       default:
@@ -193,11 +258,32 @@ function parseSource(source, fileName) {
   });
 }
 
-function walk(dir, out = []) {
+/**
+ * Recursively collects scannable files under `dir`, appending any I/O failure to `errors`.
+ *
+ * FAIL-CLOSED (finding 20 alignment): both catches below previously swallowed the error —
+ * `readdirSync` did `return out` and `statSync` did `continue`. An unreadable subdirectory or a
+ * broken symlink therefore removed files from the scan with no trace, so the guard could pass
+ * while an unscanned file held a real violation. That is the same fail-open shape as the
+ * silent specifier drop, and it is now reported instead.
+ *
+ * @param dir directory to walk
+ * @param out accumulator of scannable file paths
+ * @param errors accumulator of violation strings for paths that could not be inspected
+ * @param readDir injectable directory reader; the default is the real filesystem. This seam
+ *   exists so the two fail-closed branches above can be proven by tests on any platform —
+ *   a broken symlink requires elevation on Windows, and an untestable safety branch is
+ *   indistinguishable from the silent skip it replaced.
+ */
+export function walk(dir, out = [], errors = [], readDir = defaultReadDir) {
   let entries;
   try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
+    entries = readDir(dir);
+  } catch (err) {
+    errors.push(
+      `${toPosix(dir)} could not be read, so the files beneath it were not verified ` +
+        `(${err.code ?? 'unknown error'}) (ADR 0001)`
+    );
     return out;
   }
   for (const entry of entries) {
@@ -206,13 +292,28 @@ function walk(dir, out = []) {
     let isDirectory;
     try {
       isDirectory = entry.isDirectory() || (entry.isSymbolicLink() && statSync(full).isDirectory());
-    } catch {
+    } catch (err) {
+      errors.push(
+        `${toPosix(full)} could not be inspected, so it was not verified ` +
+          `(${err.code ?? 'unknown error'}) (ADR 0001)`
+      );
       continue;
     }
-    if (isDirectory) walk(full, out);
+    if (isDirectory) walk(full, out, errors, readDir);
     else if (SCANNED_EXTENSIONS.has(extname(entry.name))) out.push(full);
   }
   return out;
+}
+
+/**
+ * The real filesystem directory reader used by `walk` in production.
+ *
+ * Declared as a `function` rather than a `const` arrow so it is hoisted: `walk` names it as a
+ * default parameter value above this point, which would be a temporal-dead-zone error for a
+ * `const` if `walk` were ever called during module initialization.
+ */
+function defaultReadDir(dir) {
+  return readdirSync(dir, { withFileTypes: true });
 }
 
 const toPosix = (p) => relative('.', p).split('\\').join('/');
@@ -257,7 +358,9 @@ export function collect() {
     } catch {
       // Missing or malformed manifest: fall through and still scan this package's sources.
     }
-    for (const file of walk(join('packages', pkg))) {
+    // `errors` is threaded in so an unreadable subdirectory or broken symlink surfaces as a
+    // violation instead of quietly shrinking the scan (fail-closed invariant).
+    for (const file of walk(join('packages', pkg), [], errors)) {
       const rel = toPosix(file);
       let source;
       try {
