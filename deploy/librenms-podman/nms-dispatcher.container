@@ -1,0 +1,47 @@
+[Unit]
+Description=NMS LibreNMS dispatcher (poller/discovery sidecar)
+After=nms-network.service nms-db.service nms-redis.service nms-librenms.service
+Requires=nms-network.service nms-db.service nms-redis.service
+
+[Container]
+ContainerName=nms-dispatcher
+Image=docker.io/librenms/librenms:25.7.0
+Network=nms.network
+Volume=nms-librenms-data:/data:Z
+# :z (SHARED) - third consumer of the RRD tree
+Volume=%h/nms/rrd:/data/rrd:z
+EnvironmentFile=%h/nms/.env
+Environment=TZ=UTC
+Environment=PUID=1000
+Environment=PGID=1000
+Environment=SIDECAR_DISPATCHER=1
+Environment=DB_HOST=nms-db
+Environment=DB_NAME=librenms
+Environment=DB_USER=librenms
+Environment=DB_TIMEOUT=60
+Environment=REDIS_HOST=nms-redis
+Environment=REDIS_PORT=6379
+Environment=CACHE_DRIVER=redis
+Environment=SESSION_DRIVER=redis
+Environment=LIBRENMS_RRDCACHED_ENABLE=true
+Environment=LIBRENMS_RRDCACHED_HOST=nms-rrdcached
+Environment=LIBRENMS_RRDCACHED_PORT=42217
+# Workers tuned DOWN from upstream default 24. Host has 32 vCPU but is SHARED with a
+# third party's Kafka/ZooKeeper estate plus two Python services - POC scale is tens of
+# devices, so 4 is generous. Raising this on a co-tenanted host is a co-tenancy risk.
+Environment=DISPATCHER_POLLER_WORKERS=4
+Environment=DISPATCHER_DISCOVERY_WORKERS=2
+Environment=DISPATCHER_SERVICES_WORKERS=2
+# CAP_NET_RAW: fping ships with cap_net_raw=ep but rootless userns drops it from the
+# bounding set, so ICMP availability checks fail (validate.php FAIL). Verified rootless:
+# --cap-add=net_raw restores it with NO sudo. Device availability depends on this.
+AddCapability=net_raw
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target

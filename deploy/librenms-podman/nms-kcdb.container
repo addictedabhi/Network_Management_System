@@ -1,0 +1,23 @@
+[Unit]
+Description=NMS Keycloak PostgreSQL (POC IdP datastore)
+After=nms-network.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-kcdb
+Image=docker.io/library/postgres:16-alpine
+Network=nms.network
+# NOT published
+Volume=nms-kcdb-data:/var/lib/postgresql/data:Z
+EnvironmentFile=%h/nms/.env.keycloak
+Environment=POSTGRES_DB=keycloak
+Environment=POSTGRES_USER=keycloak
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

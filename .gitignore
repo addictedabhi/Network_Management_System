@@ -1,0 +1,19 @@
+# Secrets — never commit
+Credentials.md
+.env
+.env.*
+!.env.example
+!.env.keycloak.example
+
+# Dependencies / build
+node_modules/
+dist/
+.next/
+coverage/
+*.tsbuildinfo
+
+# Logs
+*.log
+
+# Local scratch artifacts (team artifacts under .claude/team/artifacts are tracked separately)
+artifacts/

@@ -1,0 +1,25 @@
+[Unit]
+Description=NMS MariaDB (LibreNMS primary datastore)
+After=nms-network.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-db
+Image=docker.io/library/mariadb:11.4
+Network=nms.network
+# NOT published - reachable only on the nms network (Task 0.5 Step 2 compensating control)
+Volume=nms-db-data:/var/lib/mysql:Z
+EnvironmentFile=%h/nms/.env
+Environment=MARIADB_DATABASE=librenms
+Environment=MARIADB_USER=librenms
+Exec=--character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci --innodb-file-per-table=1 --lower-case-table-names=0
+# Container log cap - PRECONDITION OF FIRST START (co-tenancy: shared filesystem, no snapshot)
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

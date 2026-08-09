@@ -1,0 +1,15 @@
+{
+  "extraKnownMarketplaces": {
+    "airlinq": {
+      "source": {
+        "source": "github",
+        "repo": "peeyush-tm/Airlinq-agent-kit"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "airlinq-core@airlinq": true,
+    "airlinq-dev-team@airlinq": true,
+    "superpowers@claude-plugins-official": true
+  }
+}

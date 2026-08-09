@@ -1,0 +1,32 @@
+[Unit]
+Description=NMS Keycloak (POC IdP, co-hosted - OQ-25; floor check 32 vCPU/62 GiB PASSED)
+After=nms-network.service nms-kcdb.service
+Requires=nms-network.service nms-kcdb.service
+
+[Container]
+ContainerName=nms-keycloak
+Image=quay.io/keycloak/keycloak:26.0
+Network=nms.network
+# NOT published on the host - reached through nms-proxy at /auth/ only.
+EnvironmentFile=%h/nms/.env.keycloak
+Environment=KC_DB=postgres
+Environment=KC_DB_URL_HOST=nms-kcdb
+Environment=KC_DB_URL_DATABASE=keycloak
+Environment=KC_DB_USERNAME=keycloak
+Environment=KC_HTTP_ENABLED=true
+Environment=KC_HTTP_PORT=8081
+Environment=KC_HOSTNAME=https://10.121.77.206:8443/auth
+Environment=KC_HOSTNAME_STRICT=false
+Environment=KC_HTTP_RELATIVE_PATH=/auth
+Environment=KC_PROXY_HEADERS=xforwarded
+Environment=KC_HEALTH_ENABLED=true
+Exec=start --optimized=false
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=600
+
+[Install]
+WantedBy=default.target
