@@ -6,20 +6,25 @@ Requires=nms-network.service nms-db.service
 [Container]
 ContainerName=nms-syslogng
 Image=docker.io/librenms/librenms:25.7.0
-Network=nms.network
+# F-1 FIX (findings §F-1): pasta preserves the real source IP (the `nms` bridge masquerades it).
+# ONLY the two receiver sidecars move to pasta; --map-gw reaches host loopback-published DB/Redis.
+Network=pasta:--map-gw
 # 1514 NOT 514: rootless cannot bind <1024. FR-56a scoped exception (approved).
 PublishPort=1514:514/udp
-Volume=nms-librenms-data:/data:Z
+# Shared volume (librenms + 3 sidecars) -> :z (shared MCS label), NOT :Z. See nms-librenms.container.
+Volume=nms-librenms-data:/data:z
 EnvironmentFile=%h/nms/.env
 Environment=TZ=UTC
 Environment=PUID=1000
 Environment=PGID=1000
 Environment=SIDECAR_SYSLOGNG=1
-Environment=DB_HOST=nms-db
+# On pasta the bridge name `nms-db` is unreachable; reach host loopback-published DB/Redis via
+# the pasta gateway (10.121.78.1). Externally invisible (127.0.0.1-only bind; 9a passes).
+Environment=DB_HOST=10.121.78.1
 Environment=DB_NAME=librenms
 Environment=DB_USER=librenms
 Environment=DB_TIMEOUT=60
-Environment=REDIS_HOST=nms-redis
+Environment=REDIS_HOST=10.121.78.1
 Environment=REDIS_PORT=6379
 LogDriver=k8s-file
 PodmanArgs=--log-opt max-size=10m

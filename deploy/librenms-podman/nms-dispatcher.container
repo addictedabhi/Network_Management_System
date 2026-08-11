@@ -7,7 +7,8 @@ Requires=nms-network.service nms-db.service nms-redis.service
 ContainerName=nms-dispatcher
 Image=docker.io/librenms/librenms:25.7.0
 Network=nms.network
-Volume=nms-librenms-data:/data:Z
+# Shared volume (librenms + 3 sidecars) -> :z (shared MCS label), NOT :Z. See nms-librenms.container.
+Volume=nms-librenms-data:/data:z
 # :z (SHARED) - third consumer of the RRD tree
 Volume=%h/nms/rrd:/data/rrd:z
 EnvironmentFile=%h/nms/.env

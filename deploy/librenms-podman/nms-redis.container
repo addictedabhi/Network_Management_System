@@ -7,7 +7,10 @@ Requires=nms-network.service
 ContainerName=nms-redis
 Image=docker.io/library/redis:7.4-alpine
 Network=nms.network
-# NOT published
+# LOOPBACK-ONLY publish (F-1): reachable by the pasta receiver sidecars via the host gateway.
+# 127.0.0.1 only -> not externally reachable, isolation check 9a still passes. Bridge
+# containers continue to use `nms-redis` over the `nms` network.
+PublishPort=127.0.0.1:6379:6379
 LogDriver=k8s-file
 PodmanArgs=--log-opt max-size=10m
 

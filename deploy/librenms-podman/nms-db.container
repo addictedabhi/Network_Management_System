@@ -7,7 +7,11 @@ Requires=nms-network.service
 ContainerName=nms-db
 Image=docker.io/library/mariadb:11.4
 Network=nms.network
-# NOT published - reachable only on the nms network (Task 0.5 Step 2 compensating control)
+# LOOPBACK-ONLY publish (F-1): the pasta-networked receiver sidecars (snmptrapd/syslogng)
+# cannot reach the `nms` bridge, so they reach MariaDB via the host gateway. Bound to
+# 127.0.0.1 ONLY -> NOT on any external interface, so isolation check 9a (external scan)
+# still passes. The bridge containers continue to use `nms-db` over the `nms` network.
+PublishPort=127.0.0.1:3306:3306
 Volume=nms-db-data:/var/lib/mysql:Z
 EnvironmentFile=%h/nms/.env
 Environment=MARIADB_DATABASE=librenms

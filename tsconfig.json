@@ -6,6 +6,9 @@
     },
     {
       "path": "./packages/bff"
+    },
+    {
+      "path": "./packages/simulator"
     }
   ]
 }

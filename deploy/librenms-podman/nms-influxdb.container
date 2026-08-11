@@ -1,0 +1,37 @@
+[Unit]
+Description=NMS InfluxDB v2 (time-series metric store, OQ-3 re-answered - ADR 0009 / ADR 0005 rev 3-b)
+After=nms-network.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-influxdb
+# Pinned v2.x explicitly. NEVER :latest, never v1, never v3 - the 1.x/2.x/3.x split is a
+# known hazard (ADR 0009); LibreNMS speaks the InfluxDBv2 datastore, so the container is v2.
+Image=docker.io/library/influxdb:2.7.11
+Network=nms.network
+# NOT published - internal only, reachable on the nms network. BFF is the sole reader
+# server-side (ADR 0002 / CON-6: no browser->TSDB). Default HTTP API is 8086, not published.
+# Single-consumer named volume -> :Z (private) label, same class as the former Timescale data.
+Volume=nms-influxdb-data:/var/lib/influxdb2:Z
+Volume=nms-influxdb-config:/etc/influxdb2:Z
+EnvironmentFile=%h/nms/.env
+# First-start bootstrap: setup mode creates org, bucket, admin user and operator token, and
+# sets the BUCKET RETENTION as a PRECONDITION OF FIRST START (team-config §8 guardrail 4).
+Environment=DOCKER_INFLUXDB_INIT_MODE=setup
+Environment=DOCKER_INFLUXDB_INIT_ORG=nms
+Environment=DOCKER_INFLUXDB_INIT_BUCKET=librenms
+# 14-day bucket retention - the shared-disk / waived-snapshot precondition, re-expressed
+# from the old Timescale drop_after 14d. An unbounded bucket on vg_opt-lv_opt (which also
+# holds the third party's Kafka logs) is exactly the co-tenancy hazard this prevents.
+Environment=DOCKER_INFLUXDB_INIT_RETENTION=14d
+# Init username + password + admin/operator token are injected from ~/nms/.env (0600),
+# never committed. See .env.example for placeholder shapes.
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=300
+
+[Install]
+WantedBy=default.target

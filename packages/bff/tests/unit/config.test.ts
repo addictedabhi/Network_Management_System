@@ -13,7 +13,11 @@ const valid = {
   OIDC_REDIRECT_URI: 'http://localhost:4000/auth/callback',
   SESSION_COOKIE_NAME: 'nms_session',
   ROLE_MAP: '{"nms-admin":"admin","nms-readonly":"readonly"}',
-  AUTH_MODE: 'oidc'
+  AUTH_MODE: 'oidc',
+  TSDB_URL: 'http://localhost:8086',
+  TSDB_ORG: 'nms',
+  TSDB_BUCKET: 'librenms',
+  TSDB_TOKEN: 'tsdb-test-token'
 };
 
 describe('loadConfig', () => {
@@ -24,6 +28,57 @@ describe('loadConfig', () => {
   it('throws when a required secret is missing', () => {
     const { LIBRENMS_API_TOKEN, ...missing } = valid;
     expect(() => loadConfig(missing)).toThrow(/LIBRENMS_API_TOKEN/);
+  });
+
+  it('exposes the InfluxDB v2 (TSDB) config server-side (ADR 0009)', () => {
+    const cfg = loadConfig(valid);
+    expect(cfg.tsdb).toEqual({
+      url: 'http://localhost:8086',
+      org: 'nms',
+      bucket: 'librenms',
+      token: 'tsdb-test-token'
+    });
+    // POC CA is optional and absent by default (system trust store only).
+    expect(cfg.pocTlsCaCert).toBeUndefined();
+  });
+
+  it.each(['TSDB_URL', 'TSDB_ORG', 'TSDB_BUCKET', 'TSDB_TOKEN'])(
+    'throws when required TSDB key %s is missing',
+    (key) => {
+      const { [key]: _removed, ...missing } = valid;
+      expect(() => loadConfig(missing)).toThrow(new RegExp(key));
+    }
+  );
+
+  it('never echoes the TSDB token when another field is invalid', () => {
+    const leaked = 'influx-tok-DEADBEEF';
+    try {
+      loadConfig({ ...valid, TSDB_TOKEN: leaked, TSDB_URL: 'not-a-url' });
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect((err as Error).message).not.toContain(leaked);
+      expect((err as Error).message).toContain('TSDB_URL');
+    }
+  });
+
+  it('carries an optional POC CA cert when supplied', () => {
+    const cfg = loadConfig({ ...valid, POC_TLS_CA_CERT: '-----BEGIN CERTIFICATE-----\nabc\n-----END CERTIFICATE-----' });
+    expect(cfg.pocTlsCaCert).toContain('BEGIN CERTIFICATE');
+  });
+
+  it('un-escapes a PEM supplied with literal \\n sequences (env-file transport)', () => {
+    // An EnvironmentFile cannot carry real newlines in one value, so the PEM arrives with literal
+    // backslash-n. node:https `ca` needs REAL newlines, so the loader normalizes them.
+    const escaped = '-----BEGIN CERTIFICATE-----\\nabc\\ndef\\n-----END CERTIFICATE-----';
+    const cfg = loadConfig({ ...valid, POC_TLS_CA_CERT: escaped });
+    expect(cfg.pocTlsCaCert).toContain('\n');
+    expect(cfg.pocTlsCaCert).not.toContain('\\n');
+    expect(cfg.pocTlsCaCert!.split('\n').length).toBeGreaterThanOrEqual(4);
+  });
+
+  it('carries an optional POC CA cert FILE path when supplied (env-file cannot hold a PEM)', () => {
+    const cfg = loadConfig({ ...valid, POC_TLS_CA_CERT_FILE: '/etc/nms/tls/nms.crt' });
+    expect(cfg.pocTlsCaCertFile).toBe('/etc/nms/tls/nms.crt');
   });
 
   it('refuses AUTH_MODE=dev-local in production', () => {

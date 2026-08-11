@@ -1,0 +1,4 @@
+- generic [active] [ref=f2e1]:
+  - main [ref=f2e2]:
+    - status [ref=f2e3]: Loading AIRNMS…
+  - alert [ref=f2e4]

@@ -1,0 +1,28 @@
+[Unit]
+Description=AIRNMS custom UI (Next.js) - served at the gateway subpath /app (Task A host deploy)
+After=nms-network.service nms-bff.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-web
+# Locally-built image (deploy/librenms-podman/web.Dockerfile), pinned by TAG; the base node image
+# is pinned BY DIGEST inside the Dockerfile. basePath=/app is baked at build time.
+# Resolved image id at deploy (2026-08-10): c23fcc718a5e.
+# Built FROM node@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2.
+Image=localhost/nms-web:0.1.0
+Network=nms.network
+# NOT published. The nginx gateway proxies /app/* to it on the nms bridge.
+# BFF_ORIGIN is the ONLY runtime value: the in-network BFF URL Next uses for its server-side
+# /bff/* rewrite. It is server-side only (not NEXT_PUBLIC_) and never reaches the browser.
+Environment=BFF_ORIGIN=http://nms-bff:4000
+Environment=NODE_ENV=production
+Environment=NEXT_TELEMETRY_DISABLED=1
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target

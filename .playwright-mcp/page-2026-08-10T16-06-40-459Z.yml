@@ -1,0 +1,91 @@
+- generic [active] [ref=f6e1]:
+  - alert [ref=f6e4]: AIRNMS — Network Operations
+  - banner [ref=f6e79]:
+    - img "AIRNMS" [ref=f6e81]
+    - navigation "Primary" [ref=f6e82]:
+      - link "Inventory" [ref=f6e83] [cursor=pointer]:
+        - /url: /app/devices
+      - link "Dashboard" [ref=f6e84] [cursor=pointer]:
+        - /url: /app/dashboard
+    - generic [ref=f6e85]:
+      - generic [ref=f6e86]: Test Engineer · engineer
+      - button "Sign out" [ref=f6e87] [cursor=pointer]
+  - main [ref=f6e88]:
+    - heading "Live Dashboard" [level=1] [ref=f6e89]
+    - paragraph [ref=f6e90]: Latest metrics polled from each device. A metric with no recent data reads “Not available” — never a fabricated zero.
+    - button "Open Admin Portal" [ref=f6e93] [cursor=pointer]
+    - generic [ref=f6e94]:
+      - generic [ref=f6e95]:
+        - generic [ref=f6e96]: mivmamxltetl01-selfmon other
+        - generic [ref=f6e97]:
+          - generic [ref=f6e98]: In octets rate
+          - generic [ref=f6e99]: Not available
+        - generic [ref=f6e100]:
+          - generic [ref=f6e101]: Out octets rate
+          - generic [ref=f6e102]: Not available
+      - generic [ref=f6e103]:
+        - generic [ref=f6e104]: 172.16.10.22 other
+        - generic [ref=f6e105]:
+          - generic [ref=f6e106]: In octets rate
+          - generic [ref=f6e107]: Not available
+        - generic [ref=f6e108]:
+          - generic [ref=f6e109]: Out octets rate
+          - generic [ref=f6e110]: Not available
+      - generic [ref=f6e111]:
+        - generic [ref=f6e112]: nms-sim-device-01 other
+        - generic [ref=f6e113]:
+          - generic [ref=f6e114]: In octets rate
+          - generic "Observed 2026-08-10T16:02:51Z" [ref=f6e116]:
+            - text: "69.38333333333334"
+            - generic [ref=f6e117]: Bps
+        - generic [ref=f6e118]:
+          - generic [ref=f6e119]: Out octets rate
+          - generic "Observed 2026-08-10T16:02:51Z" [ref=f6e121]:
+            - text: "45.74333333333333"
+            - generic [ref=f6e122]: Bps
+      - generic [ref=f6e123]:
+        - generic [ref=f6e124]: demo-radio-01 p2p
+        - generic [ref=f6e125]:
+          - generic [ref=f6e126]: RSSI
+          - generic "Observed 2026-08-10T16:06:28Z" [ref=f6e128]:
+            - text: "-54"
+            - generic [ref=f6e129]: dBm
+        - generic [ref=f6e130]:
+          - generic [ref=f6e131]: SNR
+          - generic "Observed 2026-08-10T16:06:28Z" [ref=f6e133]:
+            - text: "34"
+            - generic [ref=f6e134]: dB
+      - generic [ref=f6e135]:
+        - generic [ref=f6e136]: demo-radio-02 p2p
+        - generic [ref=f6e137]:
+          - generic [ref=f6e138]: RSSI
+          - generic [ref=f6e139]: Not available
+        - generic [ref=f6e140]:
+          - generic [ref=f6e141]: SNR
+          - generic "Observed 2026-08-10T16:05:34Z" [ref=f6e143]:
+            - text: "34"
+            - generic [ref=f6e144]: dB
+      - generic [ref=f6e145]:
+        - generic [ref=f6e146]: demo-router-01 other
+        - generic [ref=f6e147]:
+          - generic [ref=f6e148]: In octets rate
+          - generic "Observed 2026-08-10T16:05:10Z" [ref=f6e150]:
+            - text: "0"
+            - generic [ref=f6e151]: Bps
+        - generic [ref=f6e152]:
+          - generic [ref=f6e153]: Out octets rate
+          - generic "Observed 2026-08-10T16:05:10Z" [ref=f6e155]:
+            - text: "0"
+            - generic [ref=f6e156]: Bps
+      - generic [ref=f6e157]:
+        - generic [ref=f6e158]: demo-switch-01 other
+        - generic [ref=f6e159]:
+          - generic [ref=f6e160]: In octets rate
+          - generic "Observed 2026-08-10T16:05:18Z" [ref=f6e162]:
+            - text: "0"
+            - generic [ref=f6e163]: Bps
+        - generic [ref=f6e164]:
+          - generic [ref=f6e165]: Out octets rate
+          - generic "Observed 2026-08-10T16:05:18Z" [ref=f6e167]:
+            - text: "0"
+            - generic [ref=f6e168]: Bps

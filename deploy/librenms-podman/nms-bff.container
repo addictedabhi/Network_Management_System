@@ -1,0 +1,33 @@
+[Unit]
+Description=AIRNMS BFF (Node/TypeScript gateway - ADR 0002 sole data path; Task A host deploy)
+After=nms-network.service nms-redis.service nms-influxdb.service nms-librenms.service nms-keycloak.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-bff
+# Locally-built image (deploy/librenms-podman/bff.Dockerfile), pinned by TAG here; the base node
+# image is pinned BY DIGEST inside the Dockerfile. Resolved image id recorded at build time in the
+# deploy evidence. Never :latest. Resolved image id at deploy (2026-08-10): f0b5059565dd.
+# Built FROM node@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2.
+Image=localhost/nms-bff:0.1.0
+Network=nms.network
+# NOT published. Reachable only on the nms bridge; the nginx gateway proxies /bff/* to it. The
+# browser never talks to the BFF directly (same-origin /bff/* via the Next app + gateway).
+# All credentials (LibreNMS token, InfluxDB v2 token, OIDC client secret, session config, the POC
+# CA) are injected at RUNTIME from ~/nms/.env.bff (0600) — NEVER baked into the image, NEVER echoed.
+EnvironmentFile=%h/nms/.env.bff
+# The POC self-signed gateway CA (PEM). A PEM cannot survive an EnvironmentFile intact, so it is
+# bind-mounted read-only and the BFF reads it via POC_TLS_CA_CERT_FILE.
+# :z (SHARED label) NOT :Z — the TLS cert now has TWO consumers (this BFF + the nms-proxy gateway),
+# so a private per-container MCS category (:Z) would make nginx unable to read its own cert. This is
+# the recurring :z/:Z multi-consumer lesson (MEMORY.md): shared volume -> :z, single -> :Z.
+Volume=%h/nms/config/tls/nms.crt:/etc/nms/tls/nms.crt:z,ro
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
