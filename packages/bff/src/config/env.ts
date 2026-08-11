@@ -52,7 +52,23 @@ const schema = z
     ROLE_MAP: z.string().trim().min(1),
     AUTH_MODE: z.enum(['oidc', 'dev-local']).default('oidc'),
     LIBRENMS_UI_BASE_URL: z.string().url().optional(),
-    LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info')
+    LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
+    // Time-series store (ADR 0009 / ADR 0005 rev 3-b — InfluxDB v2, server-side only).
+    // Read by the BFF's InfluxMetricsReader; the token NEVER reaches the browser (ADR 0002).
+    TSDB_URL: z.string().url(),
+    TSDB_ORG: requiredSecret(),
+    TSDB_BUCKET: requiredSecret(),
+    TSDB_TOKEN: requiredSecret(),
+    // POC TLS trust (team-config §8 guardrail 6, plan Task 0.6 note): the deployed gateway
+    // uses a SELF-SIGNED certificate. Rather than disable TLS verification process-wide,
+    // an operator MAY supply the POC CA certificate as a PEM string. When present it is added
+    // to the trust store of the LibreNMS/TSDB HTTP clients ONLY — verification stays ON.
+    // A documented POC concession, never a production posture.
+    POC_TLS_CA_CERT: z.string().trim().min(1).optional(),
+    // A PEM cannot survive an EnvironmentFile intact (its whitespace/newlines are mangled by the
+    // parser), so the deployed BFF instead bind-mounts the CA and supplies its PATH here. index.ts
+    // reads the file and passes the PEM to secureFetch. Either form is accepted; the file wins.
+    POC_TLS_CA_CERT_FILE: z.string().trim().min(1).optional()
   })
   .strict();
 
@@ -70,6 +86,11 @@ export interface Config {
   readonly roleMap: Readonly<Record<string, string>>;
   readonly authMode: 'oidc' | 'dev-local';
   readonly logLevel: 'debug' | 'info' | 'warn' | 'error';
+  readonly tsdb: { url: string; org: string; bucket: string; token: string };
+  /** POC-only CA (PEM string) to trust for the self-signed gateway; undefined = system trust only. */
+  readonly pocTlsCaCert: string | undefined;
+  /** POC-only path to a mounted CA PEM file; index.ts reads it. Takes precedence over the inline PEM. */
+  readonly pocTlsCaCertFile: string | undefined;
 }
 
 /**
@@ -162,6 +183,20 @@ export function loadConfig(env: Record<string, string | undefined>): Config {
     },
     roleMap,
     authMode: value.AUTH_MODE,
-    logLevel: value.LOG_LEVEL
+    logLevel: value.LOG_LEVEL,
+    tsdb: {
+      url: value.TSDB_URL,
+      org: value.TSDB_ORG,
+      bucket: value.TSDB_BUCKET,
+      token: value.TSDB_TOKEN
+    },
+    // A PEM transported through an EnvironmentFile arrives with LITERAL `\n` (one value = one line).
+    // node:https `ca` requires REAL newlines, so normalize here. A PEM that already has real
+    // newlines is unaffected (it contains no backslash-n).
+    pocTlsCaCert:
+      value.POC_TLS_CA_CERT === undefined
+        ? undefined
+        : value.POC_TLS_CA_CERT.replace(/\\n/g, '\n'),
+    pocTlsCaCertFile: value.POC_TLS_CA_CERT_FILE
   };
 }

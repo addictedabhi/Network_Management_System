@@ -1,0 +1,10 @@
+- generic [active] [ref=f7e1]:
+  - banner [ref=f7e2]:
+    - img "AIRNMS" [ref=f7e4]
+    - navigation "Primary" [ref=f7e5]:
+      - link "Inventory" [ref=f7e6] [cursor=pointer]:
+        - /url: /app/devices
+      - link "Dashboard" [ref=f7e7] [cursor=pointer]:
+        - /url: /app/dashboard
+  - main [ref=f7e8]:
+    - status [ref=f7e9]: Loading…

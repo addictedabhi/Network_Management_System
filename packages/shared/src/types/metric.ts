@@ -28,6 +28,24 @@ export function unavailable<T = number>(reason: UnavailableReason): MetricValue<
   return { status: 'unavailable', reason };
 }
 
+/** A single (timestamp, value) point of a time-series. `value` is `unavailable` for a gap. */
+export interface SeriesPointDto {
+  readonly timestamp: string;
+  readonly value: MetricValue<number>;
+}
+
+/**
+ * A time-series response as the BFF returns it to the UI (FR-22). An absent series is an EMPTY
+ * `points` array — never a fabricated 0 line. A genuine measured 0-rate point is a real
+ * `available(0)` and is legitimate; the distinction is preserved by the `MetricValue` per point.
+ */
+export interface SeriesResponse {
+  readonly metric: string;
+  readonly deviceId: string;
+  readonly interfaceId?: string;
+  readonly points: readonly SeriesPointDto[];
+}
+
 /** Type guard narrowing to the case that actually carries a value. */
 export function isAvailable<T>(
   m: MetricValue<T>

@@ -11,5 +11,11 @@
     "airlinq-core@airlinq": true,
     "airlinq-dev-team@airlinq": true,
     "superpowers@claude-plugins-official": true
+  },
+  "permissions": {
+    "allow": [
+      "Bash(ssh aqaillm@10.121.77.206:*)",
+      "Bash(scp:*10.121.77.206:*)"
+    ]
   }
 }

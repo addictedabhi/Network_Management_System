@@ -1,0 +1,38 @@
+[Unit]
+Description=NMS oauth2-proxy (OIDC client for the LibreNMS native UI - F-5 SSO cutover)
+After=nms-network.service nms-keycloak.service nms-librenms.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-oauth2proxy
+Image=quay.io/oauth2-proxy/oauth2-proxy:v7.7.1
+Network=nms.network
+# NOT published - nginx (nms-proxy) calls it via auth_request over the nms bridge.
+EnvironmentFile=%h/nms/.env
+# OIDC against the dedicated `nms` realm. Issuer is the EXTERNAL URL (matches token iss);
+# discovery is fetched via the gateway. Self-signed TLS -> skip issuer cert verification (POC).
+Environment=OAUTH2_PROXY_PROVIDER=oidc
+Environment=OAUTH2_PROXY_OIDC_ISSUER_URL=https://10.121.77.206:8443/auth/realms/nms
+Environment=OAUTH2_PROXY_CLIENT_ID=nms-native
+Environment=OAUTH2_PROXY_REDIRECT_URL=https://10.121.77.206:8443/oauth2/callback
+Environment=OAUTH2_PROXY_SSL_INSECURE_SKIP_VERIFY=true
+Environment=OAUTH2_PROXY_HTTP_ADDRESS=0.0.0.0:4180
+Environment=OAUTH2_PROXY_REVERSE_PROXY=true
+Environment=OAUTH2_PROXY_COOKIE_SECURE=true
+Environment=OAUTH2_PROXY_EMAIL_DOMAINS=*
+# POC: Keycloak users may not have verified emails; accept them (not a production posture).
+Environment=OAUTH2_PROXY_INSECURE_OIDC_ALLOW_UNVERIFIED_EMAIL=true
+# Emit identity headers nginx forwards to LibreNMS as X-Remote-User / X-Remote-Groups.
+Environment=OAUTH2_PROXY_SET_XAUTHREQUEST=true
+Environment=OAUTH2_PROXY_PASS_ACCESS_TOKEN=false
+Environment=OAUTH2_PROXY_SCOPE=openid profile email groups
+# CLIENT_SECRET and COOKIE_SECRET are injected from ~/nms/.env (0600), never committed.
+LogDriver=k8s-file
+PodmanArgs=--log-opt max-size=10m
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

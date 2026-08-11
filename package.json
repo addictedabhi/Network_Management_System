@@ -18,7 +18,8 @@
     "lint:deps": "node scripts/check-workspace-deps.mjs",
     "typecheck": "tsc -b",
     "dev": "npm run dev:bff",
-    "dev:bff": "npm run dev --workspace @nms/bff"
+    "dev:bff": "npm run dev --workspace @nms/bff",
+    "sim": "npm run sim --workspace @nms/simulator"
   },
   "devDependencies": {
     "@babel/parser": "7.29.8",

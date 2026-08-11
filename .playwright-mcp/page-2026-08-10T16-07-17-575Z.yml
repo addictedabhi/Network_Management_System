@@ -1,0 +1,81 @@
+- generic [active] [ref=f6e1]:
+  - alert [ref=f6e4]: AIRNMS — Network Operations
+  - banner [ref=f6e169]:
+    - img "AIRNMS" [ref=f6e171]
+    - navigation "Primary" [ref=f6e172]:
+      - link "Inventory" [ref=f6e173] [cursor=pointer]:
+        - /url: /app/devices
+      - link "Dashboard" [ref=f6e174] [cursor=pointer]:
+        - /url: /app/dashboard
+    - generic [ref=f6e175]:
+      - generic [ref=f6e176]: Test Engineer · engineer
+      - button "Sign out" [ref=f6e177] [cursor=pointer]
+  - main [ref=f6e178]:
+    - heading "Device Inventory" [level=1] [ref=f6e179]
+    - paragraph [ref=f6e180]: Live devices discovered and polled by the AIRNMS collection engine.
+    - button "Open Admin Portal" [ref=f6e183] [cursor=pointer]
+    - table [ref=f6e185]:
+      - rowgroup [ref=f6e186]:
+        - row [ref=f6e187]:
+          - columnheader "Hostname" [ref=f6e188]
+          - columnheader "Type" [ref=f6e189]
+          - columnheader "Location" [ref=f6e190]
+          - columnheader "Reachability" [ref=f6e191]
+          - columnheader "Uptime (s)" [ref=f6e192]
+      - rowgroup [ref=f6e193]:
+        - row [ref=f6e194]:
+          - cell [ref=f6e195]:
+            - link "10.121.77.206" [ref=f6e196] [cursor=pointer]:
+              - /url: /app/devices/7
+          - cell "other" [ref=f6e197]
+          - cell "—" [ref=f6e198]
+          - cell "Up" [ref=f6e199]
+          - cell "Not available" [ref=f6e200]
+        - row [ref=f6e201]:
+          - cell [ref=f6e202]:
+            - link "172.16.10.22" [ref=f6e203] [cursor=pointer]:
+              - /url: /app/devices/2
+          - cell "other" [ref=f6e204]
+          - cell "—" [ref=f6e205]
+          - cell "Down" [ref=f6e206]
+          - cell "Not available" [ref=f6e207]
+        - row [ref=f6e208]:
+          - cell [ref=f6e209]:
+            - link "nms-sim-device-01" [ref=f6e210] [cursor=pointer]:
+              - /url: /app/devices/1
+          - cell "other" [ref=f6e211]
+          - cell "NMS-POC-Lab" [ref=f6e212]
+          - cell "Up" [ref=f6e213]
+          - cell "3537594" [ref=f6e214]
+        - row [ref=f6e215]:
+          - cell [ref=f6e216]:
+            - link "sim-radio-01" [ref=f6e217] [cursor=pointer]:
+              - /url: /app/devices/5
+          - cell "p2p" [ref=f6e218]
+          - cell "Demo Lab - Rack 1" [ref=f6e219]
+          - cell "Up" [ref=f6e220]
+          - cell "1234568" [ref=f6e221]
+        - row [ref=f6e222]:
+          - cell [ref=f6e223]:
+            - link "sim-radio-02" [ref=f6e224] [cursor=pointer]:
+              - /url: /app/devices/6
+          - cell "p2p" [ref=f6e225]
+          - cell "Demo Lab - Rack 1" [ref=f6e226]
+          - cell "Up" [ref=f6e227]
+          - cell "1234568" [ref=f6e228]
+        - row [ref=f6e229]:
+          - cell [ref=f6e230]:
+            - link "sim-router-01" [ref=f6e231] [cursor=pointer]:
+              - /url: /app/devices/4
+          - cell "other" [ref=f6e232]
+          - cell "Demo Lab - Rack 1" [ref=f6e233]
+          - cell "Up" [ref=f6e234]
+          - cell "1234568" [ref=f6e235]
+        - row [ref=f6e236]:
+          - cell [ref=f6e237]:
+            - link "sim-switch-01" [ref=f6e238] [cursor=pointer]:
+              - /url: /app/devices/3
+          - cell "other" [ref=f6e239]
+          - cell "Demo Lab - Rack 1" [ref=f6e240]
+          - cell "Up" [ref=f6e241]
+          - cell "1234568" [ref=f6e242]

@@ -9,8 +9,15 @@ Image=docker.io/librenms/librenms:25.7.0
 Network=nms.network
 # NOT published. The proxy reaches it over the nms network only. On 0.4c this is the
 # ONLY boundary protecting LibreNMS (no host firewall available) - see plan Task 0.5 Step 2.
-Volume=nms-librenms-data:/data:Z
+# Shared by librenms + 3 sidecars (dispatcher, snmptrapd, syslogng) -> :z (shared MCS label).
+# :Z gives each container a PRIVATE category, so a file one writes is SELinux-invisible to the
+# others (proven: distinct ProcessLabel categories per container). Multi-consumer => :z.
+Volume=nms-librenms-data:/data:z
 Volume=%h/nms/rrd:/data/rrd:z
+# AIRNMS navbar logo (title_image). Single-file bind-mount: html/images is BAKED into the
+# image (not a volume), so a podman cp would be ephemeral - the mount makes it survive restart.
+# Single-consumer (only the web container serves html/images/custom) => :Z (private MCS label).
+Volume=%h/nms/branding/airnms_logo.png:/opt/librenms/html/images/custom/airnms_logo.png:Z
 EnvironmentFile=%h/nms/.env
 Environment=TZ=UTC
 Environment=PUID=1000

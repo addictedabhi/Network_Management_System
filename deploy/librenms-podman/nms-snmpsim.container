@@ -1,0 +1,39 @@
+[Unit]
+Description=NMS snmpsim SNMP simulator (demo-simulated-hosts: 4 sim devices + optional self-monitor)
+After=nms-network.service
+Requires=nms-network.service
+
+[Container]
+ContainerName=nms-snmpsim
+# demo-simulated-hosts FR-D1. Locally-built PINNED image: docker.io/tandrup/snmpsim has no
+# maintained tag (only latest/v0.4/v0.2.4, Python2 era), so per the design fallback the image
+# is built from PyPI snmpsim==1.2.2 (pysmi==2.0.0, cryptography==46.0.3) on python:3.12-slim.
+# Base pinned BY DIGEST: python@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36
+# Local image ID (resolved 2026-08-10): sha256:525939d766a9e92865a9d3827d64715ac24dc3c89614fabac6694efc2e59f9fd
+# Build context committed at deploy/librenms-podman/snmpsim-build/Dockerfile.
+Image=localhost/nms-snmpsim:1.2.2
+# LibreNMS keys a device by hostname (one device per hostname), but one snmpsim container
+# serves all profiles (community selects the recording). So the container answers to four
+# bridge DNS aliases, one per demo device; each LibreNMS device is added by its own alias
+# hostname with its matching community. All aliases resolve to this single container.
+Network=nms.network:alias=sim-switch-01,alias=sim-router-01,alias=sim-radio-01,alias=sim-radio-02
+# 1161/udp is NOT published to the host: reachable only on the nms bridge by LibreNMS
+# (outbound polling). Preserves the minimal-surface invariant (no new host listener).
+# Recordings are host-authored, container-read (cross SELinux context) and the directory
+# may gain a second consumer (a host-representing agent), so :z (SHARED MCS label), NOT :Z.
+# This is the standing :z-vs-:Z checklist item (4th occurrence in this project).
+Volume=%h/nms/snmpsim/data:/data:ro,z
+# snmpsim needs a writable cache dir for .dbm recording indices; keep it ephemeral in tmpfs
+# so nothing persistent is written and the read-only data mount stays read-only.
+PodmanArgs=--tmpfs /cache --log-opt max-size=10m
+# High UDP port only (no <1024 bind, no privilege, no sudo). Community string selects the
+# per-device recording (sim-switch/sim-router/sim-radio/sim-withhold[-off]).
+Exec=--data-dir /data --cache-dir /cache --logging-method stderr --agent-udpv4-endpoint=0.0.0.0:1161
+LogDriver=k8s-file
+
+[Service]
+Restart=on-failure
+TimeoutStartSec=120
+
+[Install]
+WantedBy=default.target
