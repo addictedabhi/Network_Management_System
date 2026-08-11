@@ -50,4 +50,87 @@ describe('librenms mappers — FR-24 (absent value is `unavailable`, never 0)', 
   it('keeps a non-negative duration even with a future/garbage timestamp', () => {
     expect(toAlarm({ id: 1, device_id: 1, timestamp: 'not-a-date' }).durationSeconds).toBe(0);
   });
+
+  // Regression: the panel showed the ERROR branch for the 2 REAL alarms because the mapper must
+  // not throw on the live LibreNMS 25.7.0 `/api/v0/alerts?state=1` row shape. These rows are the
+  // EXACT keys/types captured from the live stack on 2026-08-11 (values redacted where sensitive).
+  const LIVE_HIGH_CPU = {
+    hostname: 'sim-router-01',
+    id: 17,
+    device_id: 5,
+    rule_id: 2,
+    state: 1,
+    alerted: 1,
+    open: 1,
+    note: null,
+    timestamp: '2026-08-11 08:18:47',
+    info: '',
+    severity: 'warning',
+    name: 'NMS: High CPU utilisation',
+    proc: null,
+    notes: null
+  };
+  const LIVE_DEVICE_DOWN = {
+    hostname: '172.16.10.22',
+    id: 7,
+    device_id: 6,
+    rule_id: 1,
+    state: 1,
+    alerted: 1,
+    open: 1,
+    note: null,
+    timestamp: '2026-08-11 08:00:00',
+    info: '',
+    severity: 'critical',
+    name: 'NMS: Device down',
+    proc: null,
+    notes: null
+  };
+
+  it('maps a REAL live LibreNMS alert row (High CPU) without throwing', () => {
+    const a = toAlarm(LIVE_HIGH_CPU);
+    expect(a).toMatchObject({
+      id: '17',
+      deviceId: '5',
+      deviceHostname: 'sim-router-01',
+      severity: 'warning',
+      ruleName: 'NMS: High CPU utilisation',
+      acknowledged: false
+    });
+  });
+
+  it('maps a REAL live LibreNMS alert row (Device down) without throwing', () => {
+    const a = toAlarm(LIVE_DEVICE_DOWN);
+    expect(a).toMatchObject({
+      id: '7',
+      deviceHostname: '172.16.10.22',
+      severity: 'critical',
+      ruleName: 'NMS: Device down'
+    });
+  });
+
+  it('takes the rule name from the live `name` field (this endpoint has no `rule` key)', () => {
+    expect(toAlarm(LIVE_HIGH_CPU).ruleName).toBe('NMS: High CPU utilisation');
+  });
+
+  it('tolerates a numeric severity level from other LibreNMS shapes', () => {
+    expect(toAlarm({ id: 1, device_id: 1, severity: 5 }).severity).toBe('critical');
+    expect(toAlarm({ id: 1, device_id: 1, severity: 2 }).severity).toBe('warning');
+    expect(toAlarm({ id: 1, device_id: 1, severity: 0 }).severity).toBe('ok');
+  });
+
+  it('maps a valid alert row that merely lacks assumed fields — does not throw', () => {
+    // Benign shape difference: only the bare minimum present. Must map, never error.
+    const a = toAlarm({ id: 99, device_id: 3 });
+    expect(a.id).toBe('99');
+    expect(a.ruleName).toBe('unknown rule');
+    expect(a.severity).toBe('ok');
+  });
+
+  it('still ERRORS on a genuinely malformed (non-object) alert row', () => {
+    // A garbage upstream response is a true failure and must surface as an error (502), not map.
+    expect(() => toAlarm('not-an-object')).toThrow();
+    expect(() => toAlarm(42)).toThrow();
+    expect(() => toAlarm(null)).toThrow();
+  });
 });
