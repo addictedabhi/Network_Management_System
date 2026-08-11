@@ -77,10 +77,49 @@ otherwise no-ops.
 |---|---|
 | `config/10-influxdbv2.php` | InfluxDB v2 datastore (ADR 0009) |
 | `config/20-sso.php` | Keycloak SSO auth mechanism (F-5) |
-| `config/30-branding.php` | Native-UI **text** rebrand to "AIRNMS" (config-only, FR-07-compliant): sets `project_name` + `page_title_suffix`. Name only — `title_image` (logo glyph asset) deliberately unset, so the drawn LibreNMS logo glyph and deep docs/install strings remain "LibreNMS" (core-only, out of scope). Rollback: delete the file (host + `/data/config/`) + `config:clear`. |
+| `config/30-branding.php` | Native-UI rebrand to "AIRNMS" (config-only, FR-07-compliant): sets `project_name`, `page_title_suffix`, **`title_image`** (`images/custom/airnms_logo.png` — navbar wordmark, served via bind-mount), and **`favicon`** (`/images/custom/airnms_favicon.ico` — browser-tab icon). Value-shapes verified against LibreNMS 25.7.0 source: `title_image` goes through `asset()` (web-root relative), `favicon` is emitted **verbatim** into the `<link>` href (no `asset()` wrap), so it uses a **root-relative** path. Deep docs/install strings remain "LibreNMS" (core-only, out of scope). Rollback: delete the file (host + `/data/config/`) + `config:clear`. |
 
 The `30-branding.php` here is the committed copy of a host artifact applied on
 `10.121.77.206`; it is NOT auto-mounted by the quadlets (named volume, not a bind mount).
+
+### Branding assets & bind-mounts
+
+The navbar logo and favicon are served files that must survive container restart. `html/images` is
+**baked into the LibreNMS image** (not a volume), so a `podman cp` would be ephemeral — each asset is
+a single-file `Volume=` bind-mount in `nms-librenms.container`, `:Z` (single-consumer):
+
+| Repo asset | Host path (`%h` = `/opt/airlinq/aqaillm`) | Served path in container | Config key |
+|---|---|---|---|
+| `config/airnms_logo.png` (340×64 RGBA, transparent) | `%h/nms/branding/airnms_logo.png` | `/opt/librenms/html/images/custom/airnms_logo.png` | `title_image` = `images/custom/airnms_logo.png` |
+| `config/airnms_favicon.ico` (16/32/48 multi-size) | `%h/nms/branding/airnms_favicon.ico` | `/opt/librenms/html/images/custom/airnms_favicon.ico` | `favicon` = `/images/custom/airnms_favicon.ico` |
+
+(`config/airnms_favicon_256x256.png` is kept as the source high-DPI PNG; not required by the native UI.)
+
+### Staged deploy runbook — NOT YET EXECUTED (awaits explicit human authorization)
+
+This round is **repo/staging prep only** — nothing below has been run against the host. When the human
+authorizes deploy, apply in order (all rootless, no sudo, `aqaillm` UID, non-destructive):
+
+1. **Back up the current branding include** (rollback point):
+   `podman exec nms-librenms sh -c 'cp /data/config/30-branding.php /data/config/30-branding.php.bak' || true`
+2. **Copy the new assets to the host bind-mount source dir** (from the repo checkout on the host, or via `scp`):
+   `mkdir -p ~/nms/branding` then place `airnms_logo.png` and `airnms_favicon.ico` into `~/nms/branding/`.
+   (The logo path already exists from the earlier staging; this replaces it with the new processed asset and adds the favicon.)
+3. **Land the updated config include** into the `nms-librenms-data` volume:
+   `podman cp deploy/librenms-podman/config/30-branding.php nms-librenms:/data/config/30-branding.php`
+4. **Reload the favicon bind-mount** (the quadlet gained a new `Volume=` line, so the unit must be re-created, not just restarted):
+   `systemctl --user daemon-reload && systemctl --user restart nms-librenms` (targeted; do NOT touch other units).
+5. **Clear the cached config** (config is cached; the include otherwise no-ops):
+   `podman exec nms-librenms php artisan config:clear`
+6. **Verify (authenticated — an unauthenticated curl returns the SSO gate HTML, not the asset):**
+   - `<title>` still `… | AIRNMS`, footer/About still "AIRNMS".
+   - Navbar renders `<img src=".../images/custom/airnms_logo.png" alt="AIRNMS">` (0 `<svg>` glyph, 0 brand-red `#e30613`).
+   - `<link rel="shortcut icon" href="/images/custom/airnms_favicon.ico">` present in the page `<head>`; the `.ico` serves `200 image/x-icon` (or `image/vnd.microsoft.icon`) authenticated.
+   - Re-serve the identical sha256 after a `systemctl --user restart nms-librenms` to prove the bind-mount is durable (not an ephemeral `podman cp`).
+7. **Rollback (one step):** restore `30-branding.php.bak` → `/data/config/30-branding.php`, `config:clear`, restart `nms-librenms`. Assets are additive files under `images/custom/` — removing the bind-mount lines and re-creating the unit reverts to the stock glyph/favicon.
+
+FR-07: config + custom-asset only. No core file, blade, or template is edited — `images/custom/` is a
+docs-sanctioned custom dir; the shipped `librenms_logo.png`/`favicon.ico` core files are untouched.
 
 ## Preconditions of first start — NOT deferrable
 

@@ -8,21 +8,17 @@ import { use } from 'react';
 import { AuthedShell } from '../../../components/AuthedShell';
 import { DataState } from '../../../components/DataState';
 import { MetricValueCell } from '../../../components/MetricValueCell';
-import { AdminPortalLink } from '../../../components/AdminPortalLink';
 import { DeviceInterfacesPanel } from '../../../components/DeviceInterfacesPanel';
 import { useBffQuery } from '../../../hooks/useBffQuery';
 import { bffClient } from '../../../lib/bffClient';
 import type { Device } from '@nms/shared';
 
-function DetailView({ id, canOpenAdminPortal }: { id: string; canOpenAdminPortal: boolean }) {
+function DetailView({ id }: { id: string }) {
   const device = useBffQuery<Device>(() => bffClient.getDevice(id), () => false, [id]);
 
   return (
     <>
       <h1>Device Detail</h1>
-      <div className="toolbar">
-        <AdminPortalLink canOpenAdminPortal={canOpenAdminPortal} deviceId={id} />
-      </div>
 
       <DataState status={device.status} errorCode={device.errorCode} onRetry={device.reload}>
         {() => {
@@ -51,8 +47,6 @@ function DetailView({ id, canOpenAdminPortal }: { id: string; canOpenAdminPortal
 export default function DeviceDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   return (
-    <AuthedShell>
-      {(session) => <DetailView id={id} canOpenAdminPortal={session.canOpenAdminPortal} />}
-    </AuthedShell>
+    <AuthedShell>{() => <DetailView id={id} />}</AuthedShell>
   );
 }

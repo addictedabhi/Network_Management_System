@@ -9,6 +9,7 @@
 import Link from 'next/link';
 import type { SessionInfo } from '@nms/shared';
 import { LOGOUT_URL } from '../lib/bffClient';
+import { AdminPortalNavLink } from './AdminPortalNavLink';
 
 /**
  * Gateway subpath the app is served under (baked at build via BASE_PATH; '/app' on the deployed
@@ -58,6 +59,9 @@ export function AppHeader({ session }: AppHeaderProps) {
       <div className="app-header__user">
         {session ? (
           <>
+            {/* Admin-portal cross-link — nav-only, one canonical placement, role-gated the same way
+                the BFF re-checks server-side (readonly/operator never see it). */}
+            <AdminPortalNavLink canOpenAdminPortal={session.canOpenAdminPortal} />
             <span className="app-header__whoami">
               {session.displayName} · <span className="role-chip">{session.role}</span>
             </span>

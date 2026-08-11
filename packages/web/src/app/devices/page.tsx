@@ -10,7 +10,6 @@ import { useCallback, useMemo, useState } from 'react';
 import { AuthedShell } from '../../components/AuthedShell';
 import { DataState } from '../../components/DataState';
 import { DeviceTable } from '../../components/DeviceTable';
-import { AdminPortalLink } from '../../components/AdminPortalLink';
 import { useBffQuery } from '../../hooks/useBffQuery';
 import { useDeviceTableState } from '../../hooks/useDeviceTableState';
 import { bffClient } from '../../lib/bffClient';
@@ -117,7 +116,6 @@ function InventoryView({ session }: { session: SessionInfo }) {
         <button type="button" className="btn btn--secondary" onClick={table.reset}>
           Reset
         </button>
-        <AdminPortalLink canOpenAdminPortal={session.canOpenAdminPortal} />
       </div>
 
       {actionError ? (

@@ -18,6 +18,11 @@ Volume=%h/nms/rrd:/data/rrd:z
 # image (not a volume), so a podman cp would be ephemeral - the mount makes it survive restart.
 # Single-consumer (only the web container serves html/images/custom) => :Z (private MCS label).
 Volume=%h/nms/branding/airnms_logo.png:/opt/librenms/html/images/custom/airnms_logo.png:Z
+# AIRNMS favicon (config key 'favicon' = '/images/custom/airnms_favicon.ico'). Same rationale as the
+# logo: html/images is baked into the image, so a single-file bind-mount makes the .ico survive a
+# restart. Single-consumer => :Z. Served at origin '/images/custom/airnms_favicon.ico' (root-relative,
+# matching the favicon config value; the favicon href is emitted verbatim, NOT via asset()).
+Volume=%h/nms/branding/airnms_favicon.ico:/opt/librenms/html/images/custom/airnms_favicon.ico:Z
 EnvironmentFile=%h/nms/.env
 Environment=TZ=UTC
 Environment=PUID=1000

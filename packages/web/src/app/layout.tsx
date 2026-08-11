@@ -1,10 +1,25 @@
 import type { Metadata } from 'next';
 import './globals.css';
 
+/**
+ * Browser-tab favicon. The real AIRNMS favicon assets live in `public/` and are served by our own
+ * web container at `${BASE_PATH}/<asset>`. Like the navbar <img> in AppHeader, these `<link>` hrefs
+ * are NOT basePath-aware automatically, so we prefix `NEXT_PUBLIC_BASE_PATH` explicitly ('/app' on
+ * the deployed gateway, '' for a root-origin local run). We ship the multi-size `.ico` (16/32/48…)
+ * as the primary icon and the 256×256 PNG as the high-DPI/apple-touch variant.
+ */
+const ICON_PREFIX = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+
 export const metadata: Metadata = {
   title: 'AIRNMS — Network Operations',
   description: 'AIRNMS operator console — live device inventory and metrics.',
-  icons: { icon: '/airnms_logo.png' }
+  icons: {
+    icon: [
+      { url: `${ICON_PREFIX}/favicon.ico`, sizes: 'any' },
+      { url: `${ICON_PREFIX}/icon.png`, type: 'image/png', sizes: '256x256' }
+    ],
+    apple: `${ICON_PREFIX}/icon.png`
+  }
 };
 
 /**

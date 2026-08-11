@@ -38,11 +38,65 @@ describe('CpuMemHeatmap (FR-24/27)', () => {
     );
     render(<CpuMemHeatmap devices={[switchDev]} />);
     await screen.findByTestId('echart');
-    const opt = lastOption as { series: { name: string; data: unknown[] }[] };
+    const opt = lastOption as {
+      visualMap: { seriesIndex?: number; inRange?: { color?: string[] } };
+      series: {
+        name: string;
+        data: unknown[];
+        itemStyle?: { color?: string };
+      }[];
+    };
     const unavailableSeries = opt.series.find((s) => s.name === 'unavailable')!;
+    const mainSeries = opt.series.find((s) => s.name === 'utilisation')!;
     // Both cells (CPU, Memory) are unavailable → 2 N/A overlay cells; the main series has none.
     expect(unavailableSeries.data).toHaveLength(2);
+    // Main (colour-mapped) series must carry NO placeholder cell for the N/A ones — an N/A cell
+    // must never sit on the visualMap scale (where min→green would read as "healthy").
+    expect(mainSeries.data).toHaveLength(0);
+
+    // The visualMap must be scoped to ONLY the real-numeric series (index 0), so it can never
+    // colour the N/A overlay green at its scale min.
+    expect(opt.visualMap.seriesIndex).toBe(0);
+
+    // The N/A overlay carries a FIXED neutral-grey itemStyle (not a scale colour), and that colour
+    // must not be the visualMap's low/green end.
+    const naColor = unavailableSeries.itemStyle?.color?.toLowerCase();
+    const scaleColors = (opt.visualMap.inRange?.color ?? []).map((c) => c.toLowerCase());
+    expect(naColor).toBeTruthy();
+    expect(scaleColors).not.toContain(naColor);
+
     expect(screen.getByText(/not collected/i)).toBeInTheDocument();
+  });
+
+  it('excludes N/A cells from the visualMap and keeps a real 0% distinct from N/A', async () => {
+    // One cell is a GENUINE 0% (a real, collected value), the other is unavailable.
+    server.use(
+      http.get('/bff/api/v1/devices/:id/metrics/latest', ({ request }) => {
+        const metric = new URL(request.url).searchParams.get('metric');
+        if (metric === 'cpuUsage') {
+          return HttpResponse.json({
+            success: true,
+            data: { status: 'available', value: 0, timestamp: '2026-08-11T00:00:00Z' }
+          });
+        }
+        // memory unavailable
+        return HttpResponse.json({ success: true, data: { status: 'unavailable', reason: 'OID_NOT_SUPPORTED' } });
+      })
+    );
+    render(<CpuMemHeatmap devices={[switchDev]} />);
+    await screen.findByTestId('echart');
+    const opt = lastOption as {
+      visualMap: { seriesIndex?: number; min: number };
+      series: { name: string; data: [number, number, number][] }[];
+    };
+    const main = opt.series.find((s) => s.name === 'utilisation')!;
+    const unavailable = opt.series.find((s) => s.name === 'unavailable')!;
+    // The genuine 0% is a real numeric cell on the colour-mapped series (visualMap min = 0 → low/green).
+    expect(main.data).toEqual([[0, 0, 0]]);
+    // The unavailable memory cell is on the overlay, NOT the colour scale.
+    expect(unavailable.data).toHaveLength(1);
+    expect(opt.visualMap.min).toBe(0);
+    expect(opt.visualMap.seriesIndex).toBe(0);
   });
 
   it('plots a real available CPU value on the heatmap', async () => {
