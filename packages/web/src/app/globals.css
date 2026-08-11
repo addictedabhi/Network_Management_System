@@ -67,10 +67,21 @@ a:hover {
   letter-spacing: 0.04em;
 }
 
+/* Fluid, full-width content shell (like LibreNMS): the page body fills the viewport width to
+   match the full-width navbar, using generous gutters instead of a centered fixed-width column so
+   large monitors are not left with dead side margins. `width: 100%` + `min-width: 0` lets wide
+   children (tables, charts, grids) reflow/scroll within their own containers without forcing the
+   body to scroll horizontally. Gutters scale up a little on very wide screens for readability. */
 main {
-  max-width: 1100px;
-  margin: 0 auto;
+  width: 100%;
+  margin: 0;
   padding: 1.5rem;
+  min-width: 0;
+}
+@media (min-width: 1600px) {
+  main {
+    padding: 1.5rem 2.5rem;
+  }
 }
 
 h1 {
@@ -531,12 +542,15 @@ tr.is-expanded {
   margin: 0 0 0.75rem;
   color: var(--airnms-navy);
 }
+/* Fluid panel grid: fills the available width by fitting as many ~480px columns as the viewport
+   allows — two-up on a laptop, three-up on a wide monitor, single column on narrow screens — so the
+   dashboard expands into the extra width rather than stretching two panels to fill it. */
 .panel-grid {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(480px, 1fr));
   gap: 1.25rem;
 }
-@media (max-width: 820px) {
+@media (max-width: 560px) {
   .panel-grid {
     grid-template-columns: 1fr;
   }

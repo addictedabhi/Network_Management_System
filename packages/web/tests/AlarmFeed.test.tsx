@@ -49,4 +49,37 @@ describe('AlarmFeed (FR-30/32/34)', () => {
     await screen.findByText('NMS: Device down');
     expect(screen.getAllByRole('button', { name: /acknowledge/i }).length).toBeGreaterThan(0);
   });
+
+  it('never fabricates an acknowledger identity when acknowledgedBy is null (FR-32)', async () => {
+    server.use(
+      http.get('/bff/api/v1/alarms', () =>
+        HttpResponse.json({
+          success: true,
+          data: [
+            {
+              id: '99',
+              deviceId: '5',
+              deviceHostname: 'sim-radio-01',
+              deviceKind: 'p2p',
+              entity: null,
+              severity: 'critical',
+              ruleName: 'RSSI below threshold',
+              firstRaisedAt: '2026-08-11T00:00:00Z',
+              durationSeconds: 600,
+              acknowledged: true,
+              acknowledgedBy: null,
+              acknowledgedAt: '2026-08-11T00:10:00Z'
+            }
+          ],
+          meta: { page: 1, perPage: 50, total: 1, hasNext: false }
+        })
+      )
+    );
+    render(<AlarmFeed canAcknowledge={true} />);
+    await screen.findByText('RSSI below threshold');
+    // Must NOT invent a role/identity for an unknown acknowledger.
+    expect(screen.queryByText(/ack by operator/i)).not.toBeInTheDocument();
+    // An honest fallback is shown instead.
+    expect(screen.getByText(/ack by unknown/i)).toBeInTheDocument();
+  });
 });

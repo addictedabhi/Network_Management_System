@@ -101,42 +101,56 @@ export function CpuMemHeatmap({ devices }: CpuMemHeatmapProps) {
   const yAxis = rows.map((d) => d.displayName);
   const xAxis = METRICS.map((m) => m.key);
 
-  // ECharts heatmap data: [xIndex, yIndex, value]. Unavailable cells use a sentinel of `-` (ECharts
-  // treats `-` as "no data" → no coloured square) and we overlay an explicit "N/A" label on them.
-  const data: [number, number, number | '-'][] = [];
-  const naCells: { x: number; y: number }[] = [];
+  // ECharts heatmap data split across TWO series so the colour scale can NEVER touch an N/A cell:
+  //   • `utilisation` (series 0) — ONLY real numeric cells; the `visualMap` is scoped to this series,
+  //     so a genuine 0% still renders low/green while an absent metric is never mapped at all.
+  //   • `unavailable` (series 1) — the N/A cells, carrying a FIXED neutral-grey `itemStyle` (not a
+  //     scale value). The visualMap is scoped to series 0 ONLY, so this series is never colour-mapped;
+  //     its numeric value is a rendering placeholder that no colour scale ever reads.
+  // This is the honesty fix (FR-24): "not collected" reads GREY, never green (which would read as a
+  // healthy idle CPU — the same lie as a fabricated 0).
+  const REAL_SERIES_INDEX = 0;
+  const NA_FILL = '#e4e8ee'; // neutral grey — deliberately outside the visualMap's low→high ramp.
+
+  const data: [number, number, number][] = [];
+  const naCells: [number, number, number][] = [];
   rows.forEach((d, y) => {
     METRICS.forEach((m, x) => {
       const cell = grid.get(`${d.id}:${m.key}`);
       if (cell && cell.available) data.push([x, y, cell.value]);
-      else {
-        data.push([x, y, '-']);
-        naCells.push({ x, y });
-      }
+      // Placeholder value (0) renders the grey cell; series 1 is outside the visualMap so it is
+      // never colour-mapped — the value is inert.
+      else naCells.push([x, y, 0]);
     });
   });
 
   const option: EChartsCoreOption = {
     tooltip: {
-      formatter: (p: { value: [number, number, number | '-'] }) => {
-        const [, , v] = p.value;
+      formatter: (p: { seriesName?: string; value: [number, number, number | '-'] }) => {
         const device = yAxis[p.value[1]];
         const metric = xAxis[p.value[0]];
-        return v === '-'
+        return p.seriesName === 'unavailable' || p.value[2] === '-'
           ? `${device} · ${metric}: Not available`
-          : `${device} · ${metric}: ${v}%`;
+          : `${device} · ${metric}: ${p.value[2]}%`;
       }
     },
-    grid: { left: 130, right: 20, top: 20, bottom: 30 },
+    // Extra bottom margin reserves a clean band for the horizontal legend so it never overlaps the
+    // y-axis row labels; extra left margin keeps long device names off the cells.
+    grid: { left: 140, right: 24, top: 24, bottom: 64, containLabel: false },
     xAxis: { type: 'category', data: xAxis, splitArea: { show: true } },
     yAxis: { type: 'category', data: yAxis, splitArea: { show: true } },
     visualMap: {
+      // Scope the colour mapping to the REAL-numeric series only — the N/A overlay is excluded, so a
+      // no-data cell can never be coloured at the scale's green (min) end.
+      seriesIndex: REAL_SERIES_INDEX,
       min: 0,
       max: 100,
       calculable: true,
       orient: 'horizontal',
       left: 'center',
-      bottom: 0,
+      bottom: 8,
+      itemWidth: 14,
+      itemHeight: 120,
       inRange: { color: ['#1b7f43', '#e0a800', '#b3261e'] },
       text: ['high', 'low']
     },
@@ -145,16 +159,17 @@ export function CpuMemHeatmap({ devices }: CpuMemHeatmapProps) {
         name: 'utilisation',
         type: 'heatmap',
         data,
-        label: { show: true, formatter: (p: { value: [number, number, number | '-'] }) => (p.value[2] === '-' ? 'N/A' : `${p.value[2]}%`) },
+        label: { show: true, formatter: (p: { value: [number, number, number] }) => `${p.value[2]}%` },
         emphasis: { itemStyle: { shadowBlur: 6, shadowColor: 'rgba(0,0,0,0.3)' } }
       },
-      // Overlay: explicitly mark unavailable cells so they read as "not collected", not a 0%.
+      // Overlay: unavailable cells get a fixed neutral-grey fill + the "N/A" text label (NFR-30: the
+      // grey and the label TOGETHER carry the meaning — never colour alone). Excluded from visualMap.
       {
         name: 'unavailable',
         type: 'heatmap',
-        data: naCells.map((c) => [c.x, c.y, 0]),
-        itemStyle: { color: '#eceff3', borderColor: '#c9d2dd', borderType: 'dashed', borderWidth: 1 },
-        label: { show: true, color: '#8a5a00', formatter: 'N/A' },
+        data: naCells,
+        itemStyle: { color: NA_FILL, borderColor: '#c9d2dd', borderType: 'dashed', borderWidth: 1 },
+        label: { show: true, color: '#5b6470', formatter: 'N/A' },
         tooltip: { show: false },
         silent: true
       }

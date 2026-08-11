@@ -243,4 +243,14 @@ describe('LibreNmsClient', () => {
       error: 'UPSTREAM_UNAVAILABLE'
     });
   });
+
+  it('ensureUser is a documented no-op (FR-16 deferred) — it must NOT throw on every login', async () => {
+    // FR-16 provisioning is formally deferred to Task 7; LibreNMS auto-provisions via `sso` on
+    // first login. ensureUser must resolve quietly (not throw) so the login path emits no per-login
+    // warn/error for a call that can never succeed in this milestone, and never calls fetch.
+    const fetchMock = vi.fn(async () => new Response('{}', { status: 200 }));
+    const client = createLibreNmsClient(config, logger, fetchMock as unknown as typeof fetch);
+    await expect(client.ensureUser('alice', 10)).resolves.toBeUndefined();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
 });

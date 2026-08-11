@@ -65,6 +65,40 @@ describe('InfluxMetricsReader — FR-24 (absent series → `unavailable`, never 
     expect(result.points).toHaveLength(0);
   });
 
+  it('querySeries THROWS an upstream error (not empty points) when InfluxDB is unreachable', async () => {
+    // Three-states: a backend outage must be distinguishable from a genuinely-empty window. An
+    // empty points array would render the benign EMPTY state and mask a real outage (FR-43/NFR-22),
+    // so a real backend failure must surface as an ERROR — mirroring queryLatest's
+    // NO_DATA-vs-UPSTREAM_UNAVAILABLE distinction.
+    const fetchMock = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    const reader = createInfluxMetricsReader(config, logger, fetchMock as unknown as typeof fetch);
+    await expect(
+      reader.querySeries({
+        metric: 'uptime',
+        deviceId: '1',
+        from: '2026-08-10T00:00:00Z',
+        to: '2026-08-10T01:00:00Z',
+        step: '5m'
+      })
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE', status: 502 });
+  });
+
+  it('querySeries THROWS an upstream error (not empty points) on a non-2xx response', async () => {
+    const fetchMock = vi.fn(async () => new Response('server error', { status: 500 }));
+    const reader = createInfluxMetricsReader(config, logger, fetchMock as unknown as typeof fetch);
+    await expect(
+      reader.querySeries({
+        metric: 'uptime',
+        deviceId: '1',
+        from: '2026-08-10T00:00:00Z',
+        to: '2026-08-10T01:00:00Z',
+        step: '5m'
+      })
+    ).rejects.toMatchObject({ code: 'UPSTREAM_UNAVAILABLE', status: 502 });
+  });
+
   it('querySeries maps present rows to available points', async () => {
     const fetchMock = vi.fn(async () => new Response(CSV_WITH_ROWS, { status: 200 }));
     const reader = createInfluxMetricsReader(config, logger, fetchMock as unknown as typeof fetch);

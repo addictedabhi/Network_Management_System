@@ -10,7 +10,6 @@
 import { useMemo, useState } from 'react';
 import { AuthedShell } from '../../components/AuthedShell';
 import { DataState } from '../../components/DataState';
-import { AdminPortalLink } from '../../components/AdminPortalLink';
 import { FleetKpiTiles } from '../../components/dashboard/FleetKpiTiles';
 import { P2PLinkMatrix } from '../../components/dashboard/P2PLinkMatrix';
 import { TopInterfaces } from '../../components/dashboard/TopInterfaces';
@@ -71,7 +70,6 @@ function DashboardView({ session }: { session: SessionInfo }) {
               ))}
             </select>
           </label>
-          <AdminPortalLink canOpenAdminPortal={session.canOpenAdminPortal} />
         </div>
       </div>
 

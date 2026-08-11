@@ -49,11 +49,14 @@ describe('roleToLibreNmsLevel (OQ-7 FINAL)', () => {
 });
 
 describe('capability helpers', () => {
-  it('readonly cannot acknowledge; others can (FR-34)', () => {
-    expect(canAcknowledge('readonly')).toBe(false);
-    expect(canAcknowledge('operator')).toBe(true);
-    expect(canAcknowledge('engineer')).toBe(true);
+  it('only admin/engineer may acknowledge; operator and readonly may NOT (FR-34)', () => {
+    // Ack is a state-change: it is gated to admin/engineer server-side (alarms route
+    // requireRole('admin','engineer')). The capability hint the UI trusts MUST equal that gate,
+    // so operator and readonly both resolve to false — no button they cannot use.
     expect(canAcknowledge('admin')).toBe(true);
+    expect(canAcknowledge('engineer')).toBe(true);
+    expect(canAcknowledge('operator')).toBe(false);
+    expect(canAcknowledge('readonly')).toBe(false);
   });
 
   it('only admin and engineer see the admin portal (FR-42)', () => {

@@ -18,6 +18,7 @@ import {
   type Reachability
 } from '@nms/shared';
 import { z } from 'zod';
+import { AppError } from '../http/middleware/errorHandler.js';
 
 const numberish = z.union([z.number(), z.string()]).nullish();
 
@@ -37,24 +38,45 @@ const KIND_BY_TYPE: Record<string, DeviceKind> = {
   wireless: 'p2p'
 };
 
+/**
+ * Tolerant alarm schema. VERIFIED against the LIVE LibreNMS 25.7.0 `/api/v0/alerts?state=1` row
+ * (2026-08-11): keys `hostname,id,device_id,rule_id,state,alerted,open,note,timestamp,info,
+ * severity,name,proc,notes` — `severity` a lowercase string ("warning"/"critical"), `name` the
+ * rule name (there is NO `rule` key on this endpoint), `timestamp` a "YYYY-MM-DD HH:MM:SS" string.
+ *
+ * Every field is optional/nullable and unknown keys pass through, so a benign shape difference (a
+ * missing assumed field, an extra field, a numeric severity from a different LibreNMS version) maps
+ * to an `Alarm` instead of throwing. A missing key is defaulted, never fatal. Only a genuinely
+ * malformed response (not an object at all) is rejected — see `toAlarm`.
+ */
 const alarmSchema = z
   .object({
     id: numberish,
     device_id: numberish,
     hostname: z.string().nullish(),
     sysName: z.string().nullish(),
-    severity: z.string().nullish(),
+    // Real rows carry a lowercase string; tolerate a numeric severity level from other versions.
+    severity: z.union([z.string(), z.number()]).nullish(),
     rule: z.string().nullish(),
+    // The live alerts endpoint puts the rule name in `name`; keep `rule` as an alternate.
     name: z.string().nullish(),
     timestamp: z.string().nullish(),
+    // `acknowledged` may be absent; `state`/`open` describe the alert lifecycle on this endpoint.
     acknowledged: z.union([z.boolean(), z.number()]).nullish(),
+    open: z.union([z.boolean(), z.number()]).nullish(),
     acked_by: z.string().nullish(),
     acked_at: z.string().nullish(),
     entity: z.string().nullish()
   })
   .passthrough();
 
-function toSeverity(raw: string | null | undefined): AlarmSeverity {
+function toSeverity(raw: string | number | null | undefined): AlarmSeverity {
+  // Numeric severity levels (older/other LibreNMS shapes): higher = worse.
+  if (typeof raw === 'number') {
+    if (raw >= 4) return 'critical';
+    if (raw >= 2) return 'warning';
+    return 'ok';
+  }
   switch ((raw ?? '').toLowerCase()) {
     case 'critical':
     case 'crit':
@@ -68,7 +90,18 @@ function toSeverity(raw: string | null | undefined): AlarmSeverity {
 }
 
 export function toAlarm(raw: unknown): Alarm {
-  const a = alarmSchema.parse(raw);
+  // Fail-closed on genuine garbage (a non-object row is a malformed upstream response and SHOULD
+  // error), but never throw on a valid alert row that merely lacks an assumed field — that benign
+  // shape difference must MAP, so the succeeds-with-data path never renders as an error (FR-43).
+  const parsed = alarmSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError(
+      'UPSTREAM_ERROR',
+      'The monitoring engine returned a malformed alarm.',
+      502
+    );
+  }
+  const a = parsed.data;
   const firstRaisedAt = a.timestamp ?? new Date(0).toISOString();
   const parsedRaisedAt = Date.parse(firstRaisedAt);
   return {
@@ -78,7 +111,8 @@ export function toAlarm(raw: unknown): Alarm {
     deviceKind: 'other',
     entity: a.entity ?? null,
     severity: toSeverity(a.severity),
-    ruleName: a.rule ?? a.name ?? 'unknown rule',
+    // Live endpoint uses `name`; `rule` kept as a fallback for other shapes.
+    ruleName: a.name ?? a.rule ?? 'unknown rule',
     firstRaisedAt,
     durationSeconds: Number.isFinite(parsedRaisedAt)
       ? Math.max(0, Math.floor((Date.now() - parsedRaisedAt) / 1000))
@@ -102,7 +136,14 @@ const deviceSchema = z
   .passthrough();
 
 export function toDevice(raw: unknown): Device {
-  const d = deviceSchema.parse(raw);
+  // Mirror toAlarm's fail-closed shape: a sparse-but-valid row (all fields optional/nullish, unknown
+  // keys pass through) MAPS with defaults; only a genuinely-garbage (non-object) row is rejected as
+  // a clean UPSTREAM error (502) — never a raw ZodError escaping to a mislabelled 500 (FR-43).
+  const parsed = deviceSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError('UPSTREAM_ERROR', 'The monitoring engine returned a malformed device.', 502);
+  }
+  const d = parsed.data;
   const reachability: Reachability =
     d.status === null || d.status === undefined ? 'unknown' : Boolean(d.status) ? 'up' : 'down';
   return {
@@ -130,7 +171,16 @@ const portSchema = z
   .passthrough();
 
 export function toInterface(raw: unknown): DeviceInterface {
-  const p = portSchema.parse(raw);
+  // Same fail-closed shape as toDevice/toAlarm (see toDevice above).
+  const parsed = portSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError(
+      'UPSTREAM_ERROR',
+      'The monitoring engine returned a malformed interface.',
+      502
+    );
+  }
+  const p = parsed.data;
   return {
     id: String(p.port_id ?? ''),
     deviceId: String(p.device_id ?? ''),

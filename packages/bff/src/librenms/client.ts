@@ -228,11 +228,18 @@ export function createLibreNmsClient(
         total: raw.count ?? raw.ports?.length ?? 0
       };
     },
-    async ensureUser(username, level) {
-      logger.info('ensuring librenms user', { username, level });
-      // Exact mechanism (API vs the `sso` auto-provisioning path) is confirmed in Task 6 Step 5
-      // and implemented in Task 7 Step 9. Never patch LibreNMS core (FR-07).
-      throw new AppError('INTERNAL_ERROR', 'ensureUser not yet wired; see Task 7.', 500);
+    async ensureUser(_username, _level) {
+      // FR-16 (provision/update the LibreNMS user at the mapped level) is FORMALLY DEFERRED to
+      // Task 7 — see docs/plans/nms-platform-foundation-plan.md (FR-16 deferral) and the
+      // requirement doc. In this milestone LibreNMS auto-provisions the account on first SSO login
+      // via its own `sso` auth mechanism, so a validly-authenticated user is never stranded.
+      //
+      // Deliberately a documented NO-OP: it must NOT throw (that would trip the caller's
+      // best-effort catch and emit a warn on EVERY login for a call that can never succeed — a
+      // per-login error signal for deferred scope). No per-login log is emitted here. When FR-16 is
+      // implemented, wire the provisioning call here (API or the `sso` path); never patch LibreNMS
+      // core (FR-07).
+      return;
     },
     async checkHealth() {
       const startedAt = Date.now();

@@ -14,6 +14,7 @@
  * query-language type. Every request carries a timeout via `AbortController`.
  */
 import { available, unavailable, type MetricValue } from '@nms/shared';
+import { AppError } from '../http/middleware/errorHandler.js';
 import type { Logger } from '../observability/logger.js';
 import type { DependencyHealth } from '../http/routes/health.js';
 import type {
@@ -257,12 +258,18 @@ export function createInfluxMetricsReader(
           timestamp: r.time,
           value: available(r.value, r.time)
         }));
-        // No rows returned = the series is absent for that window. Return zero points; a caller
-        // rendering it shows the empty state, never a fabricated 0 line.
+        // No rows returned (no throw) = the series is genuinely absent for that window. Return zero
+        // points; a caller rendering it shows the honest EMPTY state, never a fabricated 0 line.
         return { ...base, points };
-      } catch {
+      } catch (err) {
+        // A THROW here means the store was unreachable or returned a non-2xx — a real backend
+        // OUTAGE, NOT an empty window. Surfacing it as an UPSTREAM error (mapped to 502) lets
+        // ThroughputChart / TopInterfaces render their ERROR state instead of collapsing an outage
+        // into the benign EMPTY state (three-states discipline; FR-43/NFR-22). This mirrors
+        // queryLatest's NO_DATA-vs-UPSTREAM_UNAVAILABLE split.
+        if (err instanceof AppError) throw err;
         logger.warn('influxdb series unavailable', { metric: request.metric });
-        return { ...base, points: [] };
+        throw new AppError('UPSTREAM_UNAVAILABLE', 'The metrics store is unavailable.', 502);
       }
     },
 

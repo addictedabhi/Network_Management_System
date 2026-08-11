@@ -259,7 +259,9 @@ describe('GET /api/v1/session', () => {
     const res = await agent.get('/api/v1/session');
     expect(res.status).toBe(200);
     expect(res.body.data.role).toBe('operator');
-    expect(res.body.data.canAcknowledge).toBe(true);
+    // Operator ack is DENIED (human decision): ack is a state-change gated to admin/engineer
+    // server-side, so the capability hint must equal that gate — false for operator.
+    expect(res.body.data.canAcknowledge).toBe(false);
     expect(res.body.data.canOpenAdminPortal).toBe(false);
     // No token ever appears in the session payload.
     expect(JSON.stringify(res.body)).not.toMatch(/access_token|refresh_token|eyJ/);

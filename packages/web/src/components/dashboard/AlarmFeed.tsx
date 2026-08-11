@@ -85,7 +85,7 @@ export function AlarmFeed({ canAcknowledge }: AlarmFeedProps) {
                   <span className="alarm__meta">
                     {a.deviceHostname} · <span className="alarm__sev">{a.severity}</span> ·{' '}
                     {relativeAge(a.firstRaisedAt)}
-                    {a.acknowledged ? ` · ack by ${a.acknowledgedBy ?? 'operator'}` : ''}
+                    {a.acknowledged ? ` · ack by ${a.acknowledgedBy ?? 'unknown'}` : ''}
                   </span>
                 </div>
                 {canAcknowledge && !a.acknowledged ? (
