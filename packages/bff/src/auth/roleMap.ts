@@ -45,9 +45,15 @@ export function roleToLibreNmsLevel(role: PlatformRole): number {
   }
 }
 
-/** Acknowledge capability (FR-33/34). `readonly` may not acknowledge; everyone else may. */
+/**
+ * Acknowledge capability (FR-33/34). Acknowledging is a STATE-CHANGE, gated server-side to
+ * `admin`/`engineer` only (see alarms route `requireRole('admin','engineer')`). This capability
+ * hint — which the UI trusts to show/hide the Acknowledge button — MUST equal that server gate, so
+ * `operator` and `readonly` are BOTH denied. The UI is never the control; this only keeps it from
+ * offering a button the server always rejects (403).
+ */
 export function canAcknowledge(role: PlatformRole): boolean {
-  return role !== 'readonly';
+  return role === 'admin' || role === 'engineer';
 }
 
 /** "Open Admin Portal" visibility (FR-42, OQ-7). admin + engineer only. */

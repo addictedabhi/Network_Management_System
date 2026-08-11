@@ -136,7 +136,14 @@ const deviceSchema = z
   .passthrough();
 
 export function toDevice(raw: unknown): Device {
-  const d = deviceSchema.parse(raw);
+  // Mirror toAlarm's fail-closed shape: a sparse-but-valid row (all fields optional/nullish, unknown
+  // keys pass through) MAPS with defaults; only a genuinely-garbage (non-object) row is rejected as
+  // a clean UPSTREAM error (502) — never a raw ZodError escaping to a mislabelled 500 (FR-43).
+  const parsed = deviceSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError('UPSTREAM_ERROR', 'The monitoring engine returned a malformed device.', 502);
+  }
+  const d = parsed.data;
   const reachability: Reachability =
     d.status === null || d.status === undefined ? 'unknown' : Boolean(d.status) ? 'up' : 'down';
   return {
@@ -164,7 +171,16 @@ const portSchema = z
   .passthrough();
 
 export function toInterface(raw: unknown): DeviceInterface {
-  const p = portSchema.parse(raw);
+  // Same fail-closed shape as toDevice/toAlarm (see toDevice above).
+  const parsed = portSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError(
+      'UPSTREAM_ERROR',
+      'The monitoring engine returned a malformed interface.',
+      502
+    );
+  }
+  const p = parsed.data;
   return {
     id: String(p.port_id ?? ''),
     deviceId: String(p.device_id ?? ''),

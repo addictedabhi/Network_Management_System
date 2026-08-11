@@ -133,4 +133,45 @@ describe('librenms mappers — FR-24 (absent value is `unavailable`, never 0)', 
     expect(() => toAlarm(42)).toThrow();
     expect(() => toAlarm(null)).toThrow();
   });
+
+  // Same fail-closed shape as toAlarm: a sparse-but-valid row must MAP; a genuinely-garbage
+  // (non-object) row must surface as a clean UPSTREAM error (502), never a raw ZodError → 500.
+  it('toDevice maps a sparse-but-valid row without throwing', () => {
+    const d = toDevice({ device_id: 42 });
+    expect(d.id).toBe('42');
+    expect(d.hostname).toBe('unknown');
+    expect(d.reachability).toBe('unknown');
+    expect(d.uptimeSeconds.status).toBe('unavailable');
+  });
+
+  it('toDevice errors cleanly (502 UPSTREAM_ERROR) on a genuinely malformed (non-object) row', () => {
+    for (const garbage of ['not-an-object', 42, null]) {
+      let caught: unknown;
+      try {
+        toDevice(garbage);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toMatchObject({ code: 'UPSTREAM_ERROR', status: 502 });
+    }
+  });
+
+  it('toInterface maps a sparse-but-valid row without throwing', () => {
+    const p = toInterface({ port_id: 7 });
+    expect(p.id).toBe('7');
+    expect(p.name).toBe('unknown');
+    expect(p.inOctetsRate.status).toBe('unavailable');
+  });
+
+  it('toInterface errors cleanly (502 UPSTREAM_ERROR) on a genuinely malformed (non-object) row', () => {
+    for (const garbage of ['not-an-object', 42, null]) {
+      let caught: unknown;
+      try {
+        toInterface(garbage);
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).toMatchObject({ code: 'UPSTREAM_ERROR', status: 502 });
+    }
+  });
 });
