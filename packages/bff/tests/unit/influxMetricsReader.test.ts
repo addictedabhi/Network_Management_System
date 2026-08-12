@@ -160,6 +160,34 @@ describe('InfluxMetricsReader — FR-24 (absent series → `unavailable`, never 
     expect(body).toContain('hostname"] == "sim-radio-01"');
   });
 
+  it('af60Frequency resolves to wireless-sensor / Frequency keyed by hostname (Phase 3 b)', async () => {
+    const fetchMock = vi.fn(async () => new Response(CSV_EMPTY, { status: 200 }));
+    const reader = createInfluxMetricsReader(config, logger, fetchMock as unknown as typeof fetch);
+    await reader.queryLatest({ metric: 'af60Frequency', deviceId: '5', hostname: 'sim-radio-01' });
+    const body = String((fetchMock.mock.calls[0]![1] as RequestInit).body);
+    expect(body).toContain('_measurement"] == "wireless-sensor"');
+    expect(body).toContain('sensor_descr"] == "Frequency"');
+    expect(body).toContain('hostname"] == "sim-radio-01"');
+  });
+
+  it('af60Frequency reads a real value when present, and `unavailable` (never 0) when absent', async () => {
+    const freqCsv = [
+      '#datatype,string,long,dateTime:RFC3339,double,string',
+      ',result,table,_time,_value,_field',
+      ',_result,0,2026-08-12T00:00:00Z,60000,sensor'
+    ].join('\n');
+    const present = vi.fn(async () => new Response(freqCsv, { status: 200 }));
+    const readerP = createInfluxMetricsReader(config, logger, present as unknown as typeof fetch);
+    const r1 = await readerP.queryLatest({ metric: 'af60Frequency', deviceId: '5', hostname: 'sim-radio-01' });
+    expect(r1.value).toMatchObject({ status: 'available', value: 60000 });
+
+    const absent = vi.fn(async () => new Response(CSV_EMPTY, { status: 200 }));
+    const readerA = createInfluxMetricsReader(config, logger, absent as unknown as typeof fetch);
+    const r2 = await readerA.queryLatest({ metric: 'af60Frequency', deviceId: '6', hostname: 'sim-radio-02' });
+    expect(r2.value.status).toBe('unavailable');
+    expect((r2.value as { value?: number }).value).toBeUndefined();
+  });
+
   it('ifInOctets_rate resolves to ports / INOCTETS as a per-second rate keyed by hostname', async () => {
     const fetchMock = vi.fn(async () => new Response(CSV_EMPTY, { status: 200 }));
     const reader = createInfluxMetricsReader(config, logger, fetchMock as unknown as typeof fetch);

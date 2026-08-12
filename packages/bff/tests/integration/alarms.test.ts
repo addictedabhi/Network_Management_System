@@ -80,7 +80,13 @@ function fakeLibrenms(overrides: Partial<LibreNmsClient> = {}): LibreNmsClient {
       return found;
     },
     async acknowledgeAlarm() {},
+    async listAlarmHistory() {
+      return { items: [], total: 0 };
+    },
     async listDeviceInterfaces() {
+      return { items: [], total: 0 };
+    },
+    async listDeviceEvents() {
       return { items: [], total: 0 };
     },
     async ensureUser() {},
@@ -271,5 +277,69 @@ describe('POST /api/v1/alarms/:id/ack (FR-33/34/35) — server-side role gate', 
     // No x-requested-with header → CSRF guard rejects.
     const res = await request(app).post('/api/v1/alarms/10/ack').set('Cookie', `${COOKIE}=${id}`);
     expect(res.status).toBe(403);
+  });
+});
+
+describe('GET /api/v1/alarms/:id/history (N1) — session-gated, device-scoped, real total', () => {
+  it('returns 401 without a session', async () => {
+    const { app } = buildApp();
+    const res = await request(app).get('/api/v1/alarms/10/history');
+    expect(res.status).toBe(401);
+  });
+
+  it('resolves the alarm to its device and pages its alert log with a real total', async () => {
+    const listAlarmHistory = vi.fn(async () => ({
+      items: [
+        {
+          id: '1',
+          deviceId: '5',
+          hostname: 'sim-radio-01',
+          ruleId: '2',
+          state: 1,
+          detail: 'RSSI below threshold',
+          loggedAt: '2026-08-12 10:00:00'
+        }
+      ],
+      total: 9
+    }));
+    const agent = await loggedInAgent('readonly', {
+      librenms: fakeLibrenms({ listAlarmHistory })
+    });
+    const res = await agent.get('/api/v1/alarms/10/history?page=1&perPage=25');
+    expect(res.status).toBe(200);
+    // Alarm 10 is on device 5 (per ALARMS fixture) — history is scoped to that device.
+    expect(listAlarmHistory).toHaveBeenCalledWith('5', expect.objectContaining({ page: 1, perPage: 25 }));
+    expect(res.body.meta.total).toBe(9);
+    expect(res.body.data[0].detail).toBe('RSSI below threshold');
+  });
+
+  it('a READONLY user CAN read history — it is not a privileged action (no role gate)', async () => {
+    const agent = await loggedInAgent('readonly');
+    const res = await agent.get('/api/v1/alarms/10/history');
+    expect(res.status).toBe(200);
+  });
+
+  it('404 when the alarm does not exist', async () => {
+    const agent = await loggedInAgent('operator', {
+      librenms: fakeLibrenms({
+        async getAlarm() {
+          throw new AppError('NOT_FOUND', 'Alarm not found.', 404);
+        }
+      })
+    });
+    const res = await agent.get('/api/v1/alarms/999/history');
+    expect(res.status).toBe(404);
+  });
+
+  it('honest EMPTY history (no rows, total 0), never a fabricated row', async () => {
+    const agent = await loggedInAgent('operator', {
+      librenms: fakeLibrenms({ async listAlarmHistory() {
+        return { items: [], total: 0 };
+      } })
+    });
+    const res = await agent.get('/api/v1/alarms/10/history');
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]);
+    expect(res.body.meta.total).toBe(0);
   });
 });

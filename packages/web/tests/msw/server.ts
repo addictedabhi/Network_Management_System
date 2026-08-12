@@ -102,20 +102,28 @@ export const bffHandlers = [
     const url = new URL(request.url);
     const metric = url.searchParams.get('metric')!;
     const id = params.id as string;
-    if (id === '1' && (metric === 'ifInOctets_rate' || metric === 'ifOutOctets_rate')) {
-      return HttpResponse.json({
-        success: true,
-        data: {
-          metric,
-          deviceId: id,
-          points: [
-            { timestamp: '2026-08-11T00:00:00Z', value: { status: 'available', value: 100, timestamp: '2026-08-11T00:00:00Z' } },
-            { timestamp: '2026-08-11T00:05:00Z', value: { status: 'available', value: 220, timestamp: '2026-08-11T00:05:00Z' } }
-          ]
-        }
-      });
+    const twoPoints = [
+      { timestamp: '2026-08-11T00:00:00Z', value: { status: 'available', value: 100, timestamp: '2026-08-11T00:00:00Z' } },
+      { timestamp: '2026-08-11T00:05:00Z', value: { status: 'available', value: 220, timestamp: '2026-08-11T00:05:00Z' } }
+    ];
+    const withPoints = () => HttpResponse.json({ success: true, data: { metric, deviceId: id, points: twoPoints } });
+    const empty = () => HttpResponse.json({ success: true, data: { metric, deviceId: id, points: [] } });
+
+    // Device 1 (switch): real throughput + CPU + memory history.
+    if (id === '1' && ['ifInOctets_rate', 'ifOutOctets_rate', 'cpuUsage', 'memUsedBytes'].includes(metric)) {
+      return withPoints();
     }
-    return HttpResponse.json({ success: true, data: { metric, deviceId: id, points: [] } });
+    // Device 3 (AF60 radio): all RF trends present.
+    if (id === '3' && ['cpuUsage', 'af60StaSNR', 'af60StaRSSI', 'af60TxCapacity', 'af60RxCapacity', 'af60Frequency'].includes(metric)) {
+      return withPoints();
+    }
+    // Device 4 (withheld AF60): every RF trend present EXCEPT RSSI, which is genuinely absent (FR-24
+    // showcase) → an empty series, never a fabricated 0 line.
+    if (id === '4' && metric === 'af60StaRSSI') return empty();
+    if (id === '4' && ['cpuUsage', 'af60StaSNR', 'af60TxCapacity', 'af60RxCapacity', 'af60Frequency'].includes(metric)) {
+      return withPoints();
+    }
+    return empty();
   }),
 
   // Alarms: the 2 REAL alarms that fired on the enriched stack (never fabricated rows).
@@ -164,9 +172,72 @@ export const bffHandlers = [
     HttpResponse.json({ success: true, data: { id: params.id, acknowledged: true } })
   ),
 
+  // Alarm history (N1): alarm 1 has a real (short) 2-transition timeline; alarm 2 is honestly empty.
+  http.get('/bff/api/v1/alarms/:id/history', ({ params }) => {
+    const id = params.id as string;
+    const rows =
+      id === '1'
+        ? [
+            { id: '20', deviceId: '2', hostname: '172.16.10.22', ruleId: '1', state: 1, detail: 'ICMP unreachable', loggedAt: '2026-08-12 10:00:00' },
+            { id: '19', deviceId: '2', hostname: '172.16.10.22', ruleId: '1', state: 0, detail: 'Ping restored', loggedAt: '2026-08-12 09:00:00' }
+          ]
+        : [];
+    return HttpResponse.json({
+      success: true,
+      data: rows,
+      meta: { page: 1, perPage: 50, total: rows.length, hasNext: false }
+    });
+  }),
+
+  // Device events (N2): eventlog thin-but-real; syslog honestly empty at POC.
+  http.get('/bff/api/v1/devices/:id/events', ({ request }) => {
+    const source = new URL(request.url).searchParams.get('source') ?? 'eventlog';
+    if (source === 'syslog') {
+      return HttpResponse.json({
+        success: true,
+        data: [],
+        meta: { page: 1, perPage: 50, total: 0, hasNext: false }
+      });
+    }
+    const rows = [
+      { id: '100', deviceId: '1', hostname: 'sim-switch', message: 'Device polled', type: 'poller', loggedAt: '2026-08-12 08:00:00' }
+    ];
+    return HttpResponse.json({
+      success: true,
+      data: rows,
+      meta: { page: 1, perPage: 50, total: rows.length, hasNext: false }
+    });
+  }),
+
   http.get('/bff/api/v1/admin-portal-url', () =>
     HttpResponse.json({ success: true, data: { url: 'https://10.121.77.206:8443/device/1' } })
-  )
+  ),
+
+  // Dashboard layout (ADR 0010) — stateful per test process so add/remove/save is exercised. The
+  // server default is returned until a PUT stores a layout; PUT echoes the stored layout.
+  http.get('/bff/api/v1/dashboard/layout', () =>
+    HttpResponse.json({ success: true, data: layoutState })
+  ),
+  http.put('/bff/api/v1/dashboard/layout', async ({ request }) => {
+    layoutState = (await request.json()) as typeof layoutState;
+    return HttpResponse.json({ success: true, data: layoutState });
+  }),
+  http.delete('/bff/api/v1/dashboard/layout', () => {
+    layoutState = DEFAULT_LAYOUT;
+    return HttpResponse.json({ success: true, data: layoutState });
+  })
 ];
+
+const DEFAULT_LAYOUT = {
+  version: 'v1',
+  widgets: [
+    { id: 'FleetKpiTiles', x: 0, y: 0, w: 12, h: 2 },
+    { id: 'AlarmFeed', x: 0, y: 2, w: 6, h: 4 }
+  ]
+};
+let layoutState: typeof DEFAULT_LAYOUT = DEFAULT_LAYOUT;
+export function resetLayoutState() {
+  layoutState = DEFAULT_LAYOUT;
+}
 
 export const server = setupServer(...bffHandlers);

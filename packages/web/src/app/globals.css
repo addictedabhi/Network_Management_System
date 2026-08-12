@@ -724,3 +724,254 @@ tr.is-expanded {
 .alarm-feed__ackerror {
   margin-bottom: 0.5rem;
 }
+
+/* ---- Phase 3: nav dropdown (Dashboards group) ---- */
+.nav-group {
+  position: relative;
+}
+.nav-group__summary {
+  color: #dbe7f5;
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+.nav-group__summary::-webkit-details-marker {
+  display: none;
+}
+.nav-group__summary::after {
+  content: ' ▾';
+  font-size: 0.75em;
+}
+.nav-group__menu {
+  position: absolute;
+  top: 1.75rem;
+  left: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  min-width: 12rem;
+  padding: 0.75rem 1rem;
+  background: var(--panel, #12233a);
+  border: 1px solid var(--border, rgba(255, 255, 255, 0.12));
+  border-radius: 0.5rem;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+.nav-group__menu a {
+  color: #dbe7f5;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* ---- Phase 3: pager label + table helpers ---- */
+.pager__label {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+.table__note {
+  color: var(--muted);
+  font-size: 0.85rem;
+  margin: 0.5rem 0 0;
+}
+tr.is-selected {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+/* ---- Phase 3: alarm-history / event timeline ---- */
+.timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+.timeline__item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+.timeline__glyph {
+  flex-shrink: 0;
+  width: 1.5rem;
+  text-align: center;
+}
+.timeline__body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 0.75rem;
+}
+.timeline__label {
+  font-weight: 600;
+}
+.timeline__detail {
+  color: var(--text, inherit);
+}
+.timeline__time {
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+/* ---- Phase 3: log panel (device events / syslog) ---- */
+.log-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.85rem;
+}
+.log-list__row {
+  display: flex;
+  gap: 0.75rem;
+  padding: 0.35rem 0;
+  border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.08));
+}
+.log-list__time {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.log-list__tag {
+  color: var(--accent, #7fb2e5);
+  white-space: nowrap;
+}
+.na-panel {
+  color: var(--muted);
+  padding: 1rem;
+  border: 1px dashed var(--border, rgba(255, 255, 255, 0.15));
+  border-radius: 0.5rem;
+}
+.stat-row {
+  list-style: none;
+  margin: 0;
+  padding: 0.5rem 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2rem;
+}
+.stat-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.stat-tile__value {
+  font-size: 2rem;
+  font-weight: 700;
+  line-height: 1;
+}
+.stat-tile__label {
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* ── Customisable dashboard (ADR 0010) ─────────────────────────────────────
+   CSP note: widget placement uses inline `style` ATTRIBUTES (grid-column / grid-row),
+   the same mechanism the UI already uses for bar widths and chart heights. No grid
+   library, no script-src relaxation, no new CSP directive. */
+.btn--primary {
+  background: var(--airnms-navy);
+  border-color: var(--airnms-navy);
+  color: #fff;
+}
+.btn--danger {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.btn--icon {
+  padding: 0.25rem 0.5rem;
+  min-width: 2rem;
+  line-height: 1;
+  /* On the light page body the ghost button needs dark, readable chrome. */
+  background: #fff;
+  border-color: var(--border);
+  color: var(--text);
+}
+.btn--icon:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.btn--danger.btn--icon {
+  background: var(--danger-bg);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.arrange-grid {
+  display: grid;
+  gap: 1.25rem;
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+}
+.arrange-cell {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.arrange-cell--editing {
+  outline: 2px dashed var(--airnms-accent);
+  outline-offset: 2px;
+}
+.arrange-cell__bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+  margin-bottom: 0.5rem;
+}
+.arrange-cell__controls {
+  display: flex;
+  gap: 0.25rem;
+  flex-wrap: wrap;
+}
+.arrange-cell__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.add-widget {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 1rem;
+  margin-bottom: 1.25rem;
+}
+.add-widget__title {
+  font-size: 0.95rem;
+  color: var(--muted);
+  margin: 0 0 0.75rem;
+}
+.add-widget__list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 0.75rem;
+}
+.add-widget__item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.2rem;
+  width: 100%;
+  text-align: left;
+  background: #fff;
+  border-color: var(--border);
+  color: var(--text);
+}
+.add-widget__name {
+  font-weight: 600;
+}
+.add-widget__blurb {
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-weight: 400;
+}

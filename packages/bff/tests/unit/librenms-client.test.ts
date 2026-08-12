@@ -244,6 +244,84 @@ describe('LibreNmsClient', () => {
     });
   });
 
+  // --- N1: alarm history via /api/v0/alertlog/{deviceId} (genuine server-side pagination) ---
+  it('listAlarmHistory windows via start/limit + sortorder and trusts the upstream total', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            status: 'ok',
+            logs: [
+              { id: 2, device_id: 4, state: 1, time_logged: '2026-08-12 10:00:00', details: { rule: 'High CPU' } }
+            ],
+            total: 57
+          }),
+          { status: 200 }
+        )
+    );
+    const client = createLibreNmsClient(config, logger, fetchMock as unknown as typeof fetch);
+    const res = await client.listAlarmHistory('4', { page: 2, perPage: 25 });
+    const [url] = fetchMock.mock.calls[0]!;
+    expect(String(url)).toContain('/api/v0/alertlog/4');
+    // page 2 @ 25/pp → start=25, limit=25, newest-first.
+    expect(String(url)).toContain('start=25');
+    expect(String(url)).toContain('limit=25');
+    expect(String(url)).toContain('sortorder=DESC');
+    // Real total from the upstream COUNT — not the returned-array length.
+    expect(res.total).toBe(57);
+    expect(res.items[0]).toMatchObject({ id: '2', deviceId: '4', detail: 'High CPU' });
+  });
+
+  it('listAlarmHistory honestly reports an EMPTY history (total 0), never a fabricated row', async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ status: 'ok', logs: [], total: 0 }), { status: 200 })
+    );
+    const client = createLibreNmsClient(config, logger, fetchMock as unknown as typeof fetch);
+    const res = await client.listAlarmHistory('9', { page: 1, perPage: 25 });
+    expect(res.items).toEqual([]);
+    expect(res.total).toBe(0);
+  });
+
+  it('listAlarmHistory surfaces a real 5xx as UPSTREAM_ERROR (not empty)', async () => {
+    const fetchMock = vi.fn(async () => new Response('boom', { status: 500 }));
+    const client = createLibreNmsClient(config, logger, fetchMock as unknown as typeof fetch);
+    await expect(client.listAlarmHistory('4', { page: 1, perPage: 25 })).rejects.toMatchObject({
+      code: 'UPSTREAM_ERROR',
+      status: 502
+    });
+  });
+
+  // --- N2: device events via /api/v0/eventlog|syslog/{id} ---
+  it('listDeviceEvents(eventlog) hits eventlog and maps rows with a real total', async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            status: 'ok',
+            logs: [{ event_id: 1, device_id: 3, message: 'polled', type: 'poller', datetime: '2026-08-12 08:00:00' }],
+            total: 12
+          }),
+          { status: 200 }
+        )
+    );
+    const client = createLibreNmsClient(config, logger, fetchMock as unknown as typeof fetch);
+    const res = await client.listDeviceEvents('3', 'eventlog', { page: 1, perPage: 50 });
+    expect(String(fetchMock.mock.calls[0]![0])).toContain('/api/v0/eventlog/3');
+    expect(res.total).toBe(12);
+    expect(res.items[0]).toMatchObject({ message: 'polled', type: 'poller' });
+  });
+
+  it('listDeviceEvents(syslog) hits syslog and honestly reports EMPTY at POC (total 0)', async () => {
+    const fetchMock = vi.fn(
+      async () => new Response(JSON.stringify({ status: 'ok', logs: [], total: 0 }), { status: 200 })
+    );
+    const client = createLibreNmsClient(config, logger, fetchMock as unknown as typeof fetch);
+    const res = await client.listDeviceEvents('3', 'syslog', { page: 1, perPage: 50 });
+    expect(String(fetchMock.mock.calls[0]![0])).toContain('/api/v0/syslog/3');
+    expect(res.items).toEqual([]);
+    expect(res.total).toBe(0);
+  });
+
   it('ensureUser is a documented no-op (FR-16 deferred) — it must NOT throw on every login', async () => {
     // FR-16 provisioning is formally deferred to Task 7; LibreNMS auto-provisions via `sso` on
     // first login. ensureUser must resolve quietly (not throw) so the login path emits no per-login

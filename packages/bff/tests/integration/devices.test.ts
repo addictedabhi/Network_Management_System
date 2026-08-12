@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import request from 'supertest';
 import { createApp } from '../../src/http/app.js';
 import { createLogger } from '../../src/observability/logger.js';
@@ -88,7 +88,13 @@ function fakeLibrenms(overrides: Partial<LibreNmsClient> = {}): LibreNmsClient {
       throw new AppError('NOT_FOUND', 'x', 404);
     },
     async acknowledgeAlarm() {},
+    async listAlarmHistory() {
+      return { items: [], total: 0 };
+    },
     async listDeviceInterfaces() {
+      return { items: [], total: 0 };
+    },
+    async listDeviceEvents() {
       return { items: [], total: 0 };
     },
     async ensureUser() {},
@@ -294,6 +300,52 @@ describe('GET /api/v1/devices/:id/metrics/series (FR-22)', () => {
     const res = await agent.get('/api/v1/devices/3/metrics/series?metric=ifInOctets_rate');
     expect(res.status).toBe(400);
     expect(res.body.errors[0].code).toBe('VALIDATION_ERROR');
+  });
+});
+
+describe('GET /api/v1/devices/:id/events (N2) — session-gated eventlog/syslog', () => {
+  it('returns 401 without a session', async () => {
+    const { app } = buildApp('operator');
+    const res = await request(app).get('/api/v1/devices/3/events');
+    expect(res.status).toBe(401);
+  });
+
+  it('defaults to eventlog and pages with a real total', async () => {
+    const listDeviceEvents = vi.fn(async () => ({
+      items: [
+        { id: '1', deviceId: '3', hostname: 'sim-switch-01', message: 'polled', type: 'poller', loggedAt: '2026-08-12 08:00:00' }
+      ],
+      total: 12
+    }));
+    const agent = await loggedInAgent('readonly', { librenms: fakeLibrenms({ listDeviceEvents }) });
+    const res = await agent.get('/api/v1/devices/3/events');
+    expect(res.status).toBe(200);
+    expect(listDeviceEvents).toHaveBeenCalledWith('3', 'eventlog', expect.any(Object));
+    expect(res.body.meta.total).toBe(12);
+    expect(res.body.data[0].message).toBe('polled');
+  });
+
+  it('source=syslog selects the syslog table and honestly reports EMPTY at POC', async () => {
+    const listDeviceEvents = vi.fn(async () => ({ items: [], total: 0 }));
+    const agent = await loggedInAgent('operator', { librenms: fakeLibrenms({ listDeviceEvents }) });
+    const res = await agent.get('/api/v1/devices/3/events?source=syslog');
+    expect(res.status).toBe(200);
+    expect(listDeviceEvents).toHaveBeenCalledWith('3', 'syslog', expect.any(Object));
+    expect(res.body.data).toEqual([]);
+    expect(res.body.meta.total).toBe(0);
+  });
+
+  it('surfaces a real upstream failure as an error, never empty data (NFR-22)', async () => {
+    const agent = await loggedInAgent('operator', {
+      librenms: fakeLibrenms({
+        async listDeviceEvents() {
+          throw new AppError('UPSTREAM_UNAVAILABLE', 'down', 503);
+        }
+      })
+    });
+    const res = await agent.get('/api/v1/devices/3/events');
+    expect(res.status).toBe(503);
+    expect(res.body.data).toBeUndefined();
   });
 });
 

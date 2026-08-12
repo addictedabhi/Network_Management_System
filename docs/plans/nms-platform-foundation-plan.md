@@ -3101,7 +3101,7 @@ it('rate-limits repeated callback attempts (NFR-17)', async () => { /* expect a 
 
 `routes/auth.ts` implements:
 - `GET /auth/login` — generate `state`, `nonce`, and PKCE verifier with `randomBytes`; store in a short-TTL Redis pre-session; redirect (302) to the authorization URL.
-- `GET /auth/callback` — rate-limited; look up and **delete** the pre-session (single use); exchange the code; verify the ID token; map groups → role (403 if null); `ensureUser` in LibreNMS at the mapped level (FR-16); create the session; set the cookie `Secure; HttpOnly; SameSite=Lax; Path=/`; redirect into the UI.
+- `GET /auth/callback` — rate-limited; look up and **delete** the pre-session (single use); exchange the code; verify the ID token; map groups → role (403 if null); `ensureUser` (FR-16 **CLOSED satisfied-by-auto-provision** — a documented no-op; LibreNMS's `sso` mechanism auto-provisions + per-login `syncRoles`; verified vs 25.7.0, see requirement doc FR-16 and design `nms-custdash-fr16.md` §2); create the session; set the cookie `Secure; HttpOnly; SameSite=Lax; Path=/`; redirect into the UI.
 - `POST /auth/logout` — session required, custom-header CSRF check; destroy the session; clear the cookie; redirect to the IdP end-session URL.
 - `GET /api/v1/session` — session required; return `SessionInfo` with `canAcknowledge`/`canOpenAdminPortal` as presentation hints only.
 

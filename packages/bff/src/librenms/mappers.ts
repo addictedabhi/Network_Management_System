@@ -15,7 +15,10 @@ import {
   type DeviceInterface,
   type DeviceKind,
   type AlarmSeverity,
-  type Reachability
+  type Reachability,
+  type AlertLogEntry,
+  type EventLogEntry,
+  type SyslogEntry
 } from '@nms/shared';
 import { z } from 'zod';
 import { AppError } from '../http/middleware/errorHandler.js';
@@ -194,5 +197,139 @@ export function toInterface(raw: unknown): DeviceInterface {
           : 'unknown',
     inOctetsRate: toNumberMetric(p.ifInOctets_rate),
     outOctetsRate: toNumberMetric(p.ifOutOctets_rate)
+  };
+}
+
+/**
+ * Coerce a numeric-or-string id to a plain string, defaulting to '' when absent. Log rows always
+ * carry an id, but a benign shape difference must map, not throw.
+ */
+function idString(raw: unknown): string {
+  const parsed = numberish.safeParse(raw);
+  return parsed.success && parsed.data !== null && parsed.data !== undefined
+    ? String(parsed.data)
+    : '';
+}
+
+function optionalNumber(raw: unknown): number | null {
+  const parsed = numberish.safeParse(raw);
+  if (!parsed.success || parsed.data === null || parsed.data === undefined) return null;
+  const n = typeof parsed.data === 'string' ? Number(parsed.data) : parsed.data;
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * Tolerant schema shared shape for a log row: LibreNMS `list_logs` LEFT JOINs `devices`, so every
+ * row carries `hostname`/`sysName`/`device_id` plus the log-table columns. Unknown keys pass
+ * through and every field is optional/nullable so a version/shape difference maps.
+ */
+const logBaseSchema = z
+  .object({
+    device_id: numberish,
+    host: numberish,
+    hostname: z.string().nullish(),
+    sysName: z.string().nullish()
+  })
+  .passthrough();
+
+function logHostname(row: {
+  hostname?: string | null | undefined;
+  sysName?: string | null | undefined;
+}): string | null {
+  return row.hostname ?? row.sysName ?? null;
+}
+
+/**
+ * `alert_log` row. `details` is decoded server-side by LibreNMS (gzuncompress + json_decode) to an
+ * object; we extract a human string tolerantly (a `.rule`/`.name`/message-ish field, or a stringify
+ * fallback) without assuming a fixed shape. `time_logged` is the transition timestamp; `state` is
+ * the lifecycle transition code.
+ */
+const alertLogSchema = logBaseSchema.extend({
+  id: numberish,
+  rule_id: numberish,
+  state: numberish,
+  time_logged: z.string().nullish(),
+  details: z.unknown().optional()
+});
+
+/** Pull a short human string out of the (already-decoded) alertlog `details`, tolerantly. */
+function alertDetail(details: unknown): string | null {
+  if (details === null || details === undefined) return null;
+  if (typeof details === 'string') return details.length > 0 ? details : null;
+  if (typeof details === 'object') {
+    const d = details as Record<string, unknown>;
+    for (const key of ['rule', 'name', 'msg', 'message']) {
+      const v = d[key];
+      if (typeof v === 'string' && v.length > 0) return v;
+    }
+    return null;
+  }
+  return null;
+}
+
+export function toAlertLogEntry(raw: unknown): AlertLogEntry {
+  // Fail-closed on genuine garbage (a non-object row), map a sparse-but-valid row with defaults.
+  const parsed = alertLogSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError('UPSTREAM_ERROR', 'The monitoring engine returned a malformed log.', 502);
+  }
+  const r = parsed.data;
+  return {
+    id: idString(r.id),
+    deviceId: idString(r.device_id ?? r.host),
+    hostname: logHostname(r),
+    ruleId: r.rule_id !== null && r.rule_id !== undefined ? idString(r.rule_id) : null,
+    state: optionalNumber(r.state),
+    detail: alertDetail(r.details),
+    loggedAt: r.time_logged ?? new Date(0).toISOString()
+  };
+}
+
+const eventLogSchema = logBaseSchema.extend({
+  event_id: numberish,
+  message: z.string().nullish(),
+  type: z.string().nullish(),
+  datetime: z.string().nullish()
+});
+
+export function toEventLogEntry(raw: unknown): EventLogEntry {
+  const parsed = eventLogSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError('UPSTREAM_ERROR', 'The monitoring engine returned a malformed log.', 502);
+  }
+  const r = parsed.data;
+  return {
+    id: idString(r.event_id),
+    deviceId: idString(r.device_id ?? r.host),
+    hostname: logHostname(r),
+    message: r.message ?? '',
+    type: r.type ?? null,
+    loggedAt: r.datetime ?? new Date(0).toISOString()
+  };
+}
+
+const syslogSchema = logBaseSchema.extend({
+  seq: numberish,
+  msg: z.string().nullish(),
+  program: z.string().nullish(),
+  priority: z.string().nullish(),
+  timestamp: z.string().nullish()
+});
+
+export function toSyslogEntry(raw: unknown): SyslogEntry {
+  const parsed = syslogSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new AppError('UPSTREAM_ERROR', 'The monitoring engine returned a malformed log.', 502);
+  }
+  const r = parsed.data;
+  return {
+    id: idString(r.seq),
+    deviceId: idString(r.device_id ?? r.host),
+    hostname: logHostname(r),
+    message: r.msg ?? '',
+    program: r.program ?? null,
+    priority: r.priority ?? null,
+    loggedAt: r.timestamp ?? new Date(0).toISOString()
   };
 }

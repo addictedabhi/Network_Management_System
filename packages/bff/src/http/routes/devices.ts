@@ -13,7 +13,10 @@ import type {
   Device,
   DeviceInterface,
   MetricValue,
-  SeriesResponse
+  SeriesResponse,
+  EventLogEntry,
+  SyslogEntry,
+  DeviceEventSource
 } from '@nms/shared';
 import { AppError } from '../middleware/errorHandler.js';
 import { parsePageQuery } from '../validation/pagination.js';
@@ -42,7 +45,10 @@ const ALLOWED_METRICS = new Set<string>([
   'memUsedBytes',
   'memFreeBytes',
   'af60TxCapacity',
-  'af60RxCapacity'
+  'af60RxCapacity',
+  // AF60 RF frequency + link distance (Phase 3 b) — registered in InfluxMetricsReader.
+  'af60Frequency',
+  'af60Distance'
 ]);
 
 function pageMeta(page: number, perPage: number, total: number) {
@@ -108,6 +114,30 @@ export function createDeviceRouter(deps: DeviceRoutesDeps): Router {
           perPage
         });
         const body: Paged<DeviceInterface> = {
+          success: true,
+          data: upstream.items,
+          meta: pageMeta(page, perPage, upstream.total)
+        };
+        res.status(200).json(body);
+      } catch (err) {
+        next(err);
+      }
+    })();
+  });
+
+  // GET /api/v1/devices/:id/events?source=eventlog|syslog — device eventlog/syslog (N2). A READ,
+  // session-gated only. Server-windowed with a real total. syslog is honestly EMPTY at POC (snmpsim
+  // devices emit none) — an empty result is `data: [], total: 0`, never a fabricated row.
+  router.get('/devices/:id/events', requireSession, (req, res, next) => {
+    void (async () => {
+      try {
+        const { page, perPage } = parsePageQuery(req.query);
+        const source: DeviceEventSource = req.query.source === 'syslog' ? 'syslog' : 'eventlog';
+        const upstream = await deps.librenms.listDeviceEvents(String(req.params.id), source, {
+          page,
+          perPage
+        });
+        const body: Paged<EventLogEntry | SyslogEntry> = {
           success: true,
           data: upstream.items,
           meta: pageMeta(page, perPage, upstream.total)

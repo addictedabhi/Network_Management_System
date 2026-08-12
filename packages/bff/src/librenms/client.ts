@@ -10,11 +10,26 @@
  * `AppError` taxonomy so the centralized error handler can answer a safe envelope — the raw
  * upstream body and any stack are discarded before anything reaches the wire.
  */
-import type { Alarm, Device, DeviceInterface } from '@nms/shared';
+import type {
+  Alarm,
+  Device,
+  DeviceInterface,
+  AlertLogEntry,
+  EventLogEntry,
+  SyslogEntry,
+  DeviceEventSource
+} from '@nms/shared';
 import { AppError } from '../http/middleware/errorHandler.js';
 import type { Logger } from '../observability/logger.js';
 import type { DependencyHealth } from '../http/routes/health.js';
-import { toAlarm, toDevice, toInterface } from './mappers.js';
+import {
+  toAlarm,
+  toDevice,
+  toInterface,
+  toAlertLogEntry,
+  toEventLogEntry,
+  toSyslogEntry
+} from './mappers.js';
 
 export interface LibreNmsConfig {
   readonly baseUrl: string;
@@ -46,6 +61,31 @@ const TIMEOUT_MS = 10_000;
 function windowPage<T>(items: readonly T[], q: PageQuery): PagedUpstream<T> {
   const start = Math.max(0, (q.page - 1) * q.perPage);
   return { items: items.slice(start, start + q.perPage), total: items.length };
+}
+
+/**
+ * Build the LibreNMS `list_logs` query string from a domain page query. `list_logs` DOES paginate
+ * server-side via `start` (row offset) + `limit`, and returns a real `total` (COUNT) — so we map
+ * page/perPage → start/limit and trust the upstream total (unlike the alerts/devices lists). An
+ * optional `from`/`to` window and `sortorder` are passed through when present. `sortorder` defaults
+ * to DESC so log timelines read newest-first.
+ */
+function logQueryString(q: {
+  page: number;
+  perPage: number;
+  from?: string;
+  to?: string;
+  order?: 'asc' | 'desc';
+}): string {
+  const start = Math.max(0, (q.page - 1) * q.perPage);
+  const params = new URLSearchParams({
+    start: String(start),
+    limit: String(q.perPage),
+    sortorder: q.order === 'asc' ? 'ASC' : 'DESC'
+  });
+  if (q.from) params.set('from', q.from);
+  if (q.to) params.set('to', q.to);
+  return `?${params.toString()}`;
 }
 
 export type DeviceSortColumn = 'hostname' | 'kind' | 'location' | 'reachability';
@@ -91,15 +131,39 @@ function filterAndSortDevices(devices: readonly Device[], q: DeviceListQuery): r
   return out;
 }
 
+/** Optional server-side time window for a log query (LibreNMS `from`/`to`). */
+export interface LogQuery extends PageQuery {
+  readonly from?: string;
+  readonly to?: string;
+  readonly order?: 'asc' | 'desc';
+}
+
 export interface LibreNmsClient {
   listAlarms(
     q: PageQuery & { severity?: string; acknowledged?: boolean; deviceKind?: string }
   ): Promise<PagedUpstream<Alarm>>;
   getAlarm(id: string): Promise<Alarm>;
   acknowledgeAlarm(id: string, actor: string): Promise<void>;
+  /**
+   * Alert state-transition history for a DEVICE (`/api/v0/alertlog/{deviceId}`). LibreNMS scopes
+   * alertlog by device, not by alert id, so the caller resolves the alert's device first. This
+   * endpoint paginates server-side (`start`/`limit`) and returns a real `total` (Task 6 finding —
+   * unlike the alerts list). Newest-first by default.
+   */
+  listAlarmHistory(deviceId: string, q: LogQuery): Promise<PagedUpstream<AlertLogEntry>>;
   listDevices(q: DeviceListQuery): Promise<PagedUpstream<Device>>;
   getDevice(id: string): Promise<Device>;
   listDeviceInterfaces(deviceId: string, q: PageQuery): Promise<PagedUpstream<DeviceInterface>>;
+  /**
+   * Device eventlog / syslog (`/api/v0/eventlog/{id}` | `/api/v0/syslog/{id}`). Server-windowed,
+   * real `total`. syslog is honestly EMPTY at POC (snmpsim devices emit none) — an empty result is
+   * `items: [], total: 0`, never a fabricated row.
+   */
+  listDeviceEvents(
+    deviceId: string,
+    source: DeviceEventSource,
+    q: LogQuery
+  ): Promise<PagedUpstream<EventLogEntry | SyslogEntry>>;
   ensureUser(username: string, level: number): Promise<void>;
   checkHealth(): Promise<DependencyHealth>;
 }
@@ -190,6 +254,18 @@ export function createLibreNmsClient(
         body: JSON.stringify({ note: `Acknowledged via NMS custom UI by ${actor}` })
       });
     },
+    async listAlarmHistory(deviceId, q) {
+      // `/api/v0/alertlog/{deviceId}` — genuine server-side pagination (start/limit) + real total
+      // (verified in list_logs, LibreNMS 25.7.0). Newest-first by default so the timeline reads
+      // most-recent transition at the top.
+      const raw = await call<{ logs?: unknown[]; total?: number }>(
+        `/api/v0/alertlog/${encodeURIComponent(deviceId)}${logQueryString(q)}`
+      );
+      return {
+        items: (raw.logs ?? []).map(toAlertLogEntry),
+        total: raw.total ?? raw.logs?.length ?? 0
+      };
+    },
     async listDevices(q) {
       // The engine ignores limit/offset on `list_devices` (Task 6) and its `count` is the array
       // length, not a grand total. Fetch the set and window in the BFF over the returned array.
@@ -228,17 +304,34 @@ export function createLibreNmsClient(
         total: raw.count ?? raw.ports?.length ?? 0
       };
     },
+    async listDeviceEvents(deviceId, source, q) {
+      // eventlog | syslog, both via list_logs — server-windowed, real total. syslog is honestly
+      // EMPTY at POC; an empty `logs` array maps to an empty page, never a fabricated row.
+      const path = source === 'syslog' ? 'syslog' : 'eventlog';
+      const map: (raw: unknown) => EventLogEntry | SyslogEntry =
+        source === 'syslog' ? toSyslogEntry : toEventLogEntry;
+      const raw = await call<{ logs?: unknown[]; total?: number }>(
+        `/api/v0/${path}/${encodeURIComponent(deviceId)}${logQueryString(q)}`
+      );
+      return {
+        items: (raw.logs ?? []).map(map),
+        total: raw.total ?? raw.logs?.length ?? 0
+      };
+    },
     async ensureUser(_username, _level) {
-      // FR-16 (provision/update the LibreNMS user at the mapped level) is FORMALLY DEFERRED to
-      // Task 7 — see docs/plans/nms-platform-foundation-plan.md (FR-16 deferral) and the
-      // requirement doc. In this milestone LibreNMS auto-provisions the account on first SSO login
-      // via its own `sso` auth mechanism, so a validly-authenticated user is never stranded.
-      //
-      // Deliberately a documented NO-OP: it must NOT throw (that would trip the caller's
-      // best-effort catch and emit a warn on EVERY login for a call that can never succeed — a
-      // per-login error signal for deferred scope). No per-login log is emitted here. When FR-16 is
-      // implemented, wire the provisioning call here (API or the `sso` path); never patch LibreNMS
-      // core (FR-07).
+      // FR-16 — CLOSED, satisfied by LibreNMS's own SSO auto-provisioning + per-login role sync.
+      // Verified against real LibreNMS 25.7.0 source (design nms-custdash-fr16.md §2):
+      //   (1) NO supported user-management REST API exists (routes/api.php has no users
+      //       create/update-level route), so there is no endpoint for a BFF-side write to call.
+      //   (2) The `sso` mechanism auto-provisions the native user on FIRST login
+      //       (SSOAuthorizer::authenticate, create_users) AND re-syncs the level from the
+      //       group→level map on EVERY login (SSOAuthorizer::getRoles → syncRoles in
+      //       LegacyUserProvider::retrieveByCredentials). Level drift is therefore already covered.
+      // A call here would be REDUNDANT with syncRoles and could only drift or conflict with it, so
+      // FR-16 is CLOSED as satisfied-by-auto-provision rather than built. Kept as an honestly-
+      // documented NO-OP (preserves the seam for a future non-SSO IdP, at which point FR-16 would
+      // re-open as a new work item). It must NOT throw — the caller's best-effort catch would emit
+      // a warn on every login. Never patches LibreNMS core (FR-07).
       return;
     },
     async checkHealth() {

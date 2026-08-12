@@ -123,6 +123,23 @@ const METRIC_REGISTRY: Readonly<Record<string, MetricSelector>> = {
       ['_field', 'sensor'],
       ['sensor_descr', 'Rx Capacity']
     ]
+  },
+  // AF60 RF frequency + link distance — additive rows for the P2P link matrix (Phase 3 b). Same
+  // `wireless-sensor` shape as the RF metrics above, selected by `sensor_descr`. A radio that does
+  // not report one (or the withheld showcase) simply returns no rows → `unavailable`, never 0.
+  af60Frequency: {
+    measurement: 'wireless-sensor',
+    predicates: [
+      ['_field', 'sensor'],
+      ['sensor_descr', 'Frequency']
+    ]
+  },
+  af60Distance: {
+    measurement: 'wireless-sensor',
+    predicates: [
+      ['_field', 'sensor'],
+      ['sensor_descr', 'Distance']
+    ]
   }
 };
 
