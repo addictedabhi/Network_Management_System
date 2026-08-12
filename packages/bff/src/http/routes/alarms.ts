@@ -13,7 +13,7 @@
  * acknowledger identity is taken from the SERVER-SIDE session (FR-32), never from the request body.
  */
 import { Router, type RequestHandler } from 'express';
-import type { ApiSuccess, Paged, Alarm } from '@nms/shared';
+import type { ApiSuccess, Paged, Alarm, AlertLogEntry } from '@nms/shared';
 import { AppError } from '../middleware/errorHandler.js';
 import { parsePageQuery } from '../validation/pagination.js';
 import { requireRole, requireCsrfHeader } from '../middleware/auth.js';
@@ -57,6 +57,28 @@ export function createAlarmRouter(deps: AlarmRoutesDeps): Router {
           ...(deviceKind ? { deviceKind } : {})
         });
         const body: Paged<Alarm> = {
+          success: true,
+          data: upstream.items,
+          meta: pageMeta(page, perPage, upstream.total)
+        };
+        res.status(200).json(body);
+      } catch (err) {
+        next(err);
+      }
+    })();
+  });
+
+  // GET /api/v1/alarms/:id/history — alert state-transition timeline (N1). A READ, so it is
+  // session-gated only (no role gate — reading history is not a privileged, state-changing action).
+  // LibreNMS scopes alertlog by DEVICE, so we resolve the alarm's device first, then page the
+  // device's alert log server-side (real total). A missing alarm is a clean 404.
+  router.get('/alarms/:id/history', requireSession, (req, res, next) => {
+    void (async () => {
+      try {
+        const { page, perPage } = parsePageQuery(req.query);
+        const alarm = await deps.librenms.getAlarm(String(req.params.id));
+        const upstream = await deps.librenms.listAlarmHistory(alarm.deviceId, { page, perPage });
+        const body: Paged<AlertLogEntry> = {
           success: true,
           data: upstream.items,
           meta: pageMeta(page, perPage, upstream.total)

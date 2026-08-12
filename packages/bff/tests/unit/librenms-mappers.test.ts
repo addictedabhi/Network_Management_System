@@ -1,5 +1,12 @@
 import { describe, it, expect } from 'vitest';
-import { toAlarm, toDevice, toInterface } from '../../src/librenms/mappers.js';
+import {
+  toAlarm,
+  toDevice,
+  toInterface,
+  toAlertLogEntry,
+  toEventLogEntry,
+  toSyslogEntry
+} from '../../src/librenms/mappers.js';
 
 describe('librenms mappers — FR-24 (absent value is `unavailable`, never 0)', () => {
   it('maps an absent device uptime to `unavailable`, not 0', () => {
@@ -172,6 +179,100 @@ describe('librenms mappers — FR-24 (absent value is `unavailable`, never 0)', 
         caught = e;
       }
       expect(caught).toMatchObject({ code: 'UPSTREAM_ERROR', status: 502 });
+    }
+  });
+});
+
+describe('log mappers — tolerant map of real-shaped rows, honest error on garbage (N1/N2)', () => {
+  // Shapes verified against LibreNMS 25.7.0 `list_logs` (includes/html/api_functions.inc.php):
+  // alertlog LEFT JOINs devices → hostname/sysName; alert_log carries id/device_id/rule_id/state/
+  // time_logged/details (details is decoded server-side to an object).
+  it('toAlertLogEntry maps a real alertlog row (details already decoded to an object)', () => {
+    const e = toAlertLogEntry({
+      hostname: 'sim-router-01',
+      sysName: 'sim-router-01',
+      id: 42,
+      device_id: 4,
+      rule_id: 3,
+      state: 1,
+      time_logged: '2026-08-12 10:00:00',
+      details: { rule: 'High CPU utilisation' }
+    });
+    expect(e).toMatchObject({
+      id: '42',
+      deviceId: '4',
+      hostname: 'sim-router-01',
+      ruleId: '3',
+      state: 1,
+      detail: 'High CPU utilisation',
+      loggedAt: '2026-08-12 10:00:00'
+    });
+  });
+
+  it('toAlertLogEntry maps a sparse-but-valid row (missing details/rule_id) without throwing', () => {
+    const e = toAlertLogEntry({ id: 7, device_id: 2, state: 0, time_logged: '2026-08-12 09:00:00' });
+    expect(e.id).toBe('7');
+    expect(e.detail).toBeNull();
+    expect(e.ruleId).toBeNull();
+    expect(e.hostname).toBeNull();
+  });
+
+  it('toAlertLogEntry tolerates a string details blob and a numeric-string state', () => {
+    const e = toAlertLogEntry({ id: 8, device_id: 2, state: '2', details: 'recovered' });
+    expect(e.detail).toBe('recovered');
+    expect(e.state).toBe(2);
+  });
+
+  it('toEventLogEntry maps a real eventlog row', () => {
+    const e = toEventLogEntry({
+      hostname: 'sim-switch-01',
+      event_id: 100,
+      device_id: 3,
+      message: 'Device polled successfully',
+      type: 'poller',
+      datetime: '2026-08-12 08:00:00'
+    });
+    expect(e).toMatchObject({
+      id: '100',
+      deviceId: '3',
+      hostname: 'sim-switch-01',
+      message: 'Device polled successfully',
+      type: 'poller',
+      loggedAt: '2026-08-12 08:00:00'
+    });
+  });
+
+  it('toSyslogEntry maps a real syslog row', () => {
+    const e = toSyslogEntry({
+      hostname: 'sim-router-01',
+      seq: 5,
+      device_id: 4,
+      msg: 'link down eth0',
+      program: 'kernel',
+      priority: 'warning',
+      timestamp: '2026-08-12 07:00:00'
+    });
+    expect(e).toMatchObject({
+      id: '5',
+      message: 'link down eth0',
+      program: 'kernel',
+      priority: 'warning'
+    });
+  });
+
+  it('honest EMPTY vs ERROR: a valid row maps; genuine garbage (non-object) errors cleanly (502)', () => {
+    // An empty result is the ABSENCE of rows (handled by the client, not the mapper) — the mapper
+    // never fabricates a row. Only a genuinely-malformed non-object row is a clean UPSTREAM error.
+    for (const mapper of [toAlertLogEntry, toEventLogEntry, toSyslogEntry]) {
+      for (const garbage of ['not-an-object', 42, null, undefined]) {
+        let caught: unknown;
+        try {
+          mapper(garbage);
+        } catch (e) {
+          caught = e;
+        }
+        expect(caught).toMatchObject({ code: 'UPSTREAM_ERROR', status: 502 });
+      }
     }
   });
 });

@@ -121,6 +121,56 @@ authorizes deploy, apply in order (all rootless, no sudo, `aqaillm` UID, non-des
 FR-07: config + custom-asset only. No core file, blade, or template is edited — `images/custom/` is a
 docs-sanctioned custom dir; the shipped `librenms_logo.png`/`favicon.ico` core files are untouched.
 
+## Post-install: seed the operator dashboards (FRESH deploy)
+
+On a **fresh** LibreNMS deploy the human's custom operator dashboards are not present — LibreNMS
+ships only stock "Default" dashboards. The seed recreates **all three human-authored dashboards**
+(all owned by the target user):
+
+| Dashboard | Widgets |
+|-----------|---------|
+| NOC Triage | 8 |
+| Executive Service Overview | 6 |
+| L3 Engineer - Radio, Transport & Platform | 13 |
+
+Recreate them from the repo-tracked seed **after the DB is up and after the target user exists**
+(the SSO user is provisioned on first login; seed after that first login, or point the seed at an
+already-provisioned user).
+
+This is **DB DATA seeding via SQL only** — it is **NOT** a LibreNMS core edit (FR-07 intact).
+
+**Run (on the host, as the deploy user):**
+```bash
+# after `nms-db` is healthy AND the target user (default: nms-testeng) exists:
+cd deploy/librenms-podman/seed/dashboards
+./run_seed.sh                        # default target user = nms-testeng
+# or target a different provisioned user:
+TARGET_USERNAME=<provisioned-username> ./run_seed.sh
+```
+
+`run_seed.sh` reads the DB password **key-only** from `~/nms/.env` (never printed), resolves the
+target user **by username**, and **aborts** if that user does not exist (fail-closed — never orphans
+a dashboard on a missing/`0` user_id). It then applies `seed_dashboards.sql` inside the `nms-db`
+container.
+
+**Idempotent** — safe to re-run: each dashboard row is existence-guarded on `(user_id, name)` and its
+widget set is replaced scoped to that one `dashboard_id`, so a second run yields the same 3 dashboards
+(8 + 6 + 13 = 27 widgets) with no duplication. Validated against throwaway shadow tables
+(fresh → re-run → bad-username no-op) without touching live data; evidence in
+`.claude/team/artifacts/nms-platform-foundation/dashboard-capture/`.
+
+**user_id portability:** the captured owner's user_id is NOT hardcoded (user_ids differ per install).
+All three dashboards are attached to whichever user matches `TARGET_USERNAME` (all three share one
+owner). Change the default by setting that env var or editing `@target_username` at the top of
+`seed_dashboards.sql`. Note the `L3 Engineer` graph widgets reference devices by numeric `graph_device`
+id (captured property, preserved byte-for-byte) — on a fresh install those ids resolve to whatever
+device holds them.
+
+**Schema note (25.7.0):** uses `dashboards(dashboard_id,user_id,dashboard_name,access)` and
+`users_widgets(user_widget_id,user_id,widget,col,row,size_x,size_y,title,refresh,settings,dashboard_id)`
+— note the widget table is `users_widgets` (plural). If a future LibreNMS version changes these
+columns, update the seed before running.
+
 ## Preconditions of first start — NOT deferrable
 
 Both were configured **before** the stack was first started, per the human's option-1 decision:

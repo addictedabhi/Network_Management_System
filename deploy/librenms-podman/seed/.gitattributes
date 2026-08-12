@@ -1,0 +1,4 @@
+# Seed scripts run on the Linux deploy host - force LF so CRLF from a Windows
+# checkout does not break the bash runner or the SQL file.
+*.sh  text eol=lf
+*.sql text eol=lf

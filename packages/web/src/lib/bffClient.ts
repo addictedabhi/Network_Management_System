@@ -13,7 +13,12 @@ import type {
   MetricValue,
   PageMeta,
   Alarm,
-  SeriesResponse
+  SeriesResponse,
+  AlertLogEntry,
+  EventLogEntry,
+  SyslogEntry,
+  DeviceEventSource,
+  DashboardLayout
 } from '@nms/shared';
 
 const BFF_PREFIX = '/bff';
@@ -123,7 +128,41 @@ export const bffClient = {
   ackAlarm: (id: string) =>
     request<{ id: string; acknowledged: true }>(`/api/v1/alarms/${encodeURIComponent(id)}/ack`, {
       method: 'POST'
-    }).then((r) => r.data)
+    }).then((r) => r.data),
+
+  /** Alert state-transition history (timeline) for an alarm's device (N1). Returns data + meta. */
+  getAlarmHistory: (id: string, query = '') =>
+    request<readonly AlertLogEntry[]>(
+      `/api/v1/alarms/${encodeURIComponent(id)}/history${query ? `?${query}` : ''}`
+    ),
+
+  /** The caller's personal dashboard layout, or the server default when none is saved (ADR 0010). */
+  getDashboardLayout: () =>
+    request<DashboardLayout>('/api/v1/dashboard/layout').then((r) => r.data),
+
+  /**
+   * Full-replace the caller's dashboard layout (ADR 0010). Per-user scope is enforced server-side
+   * from the session subject — this request carries no user id. The CSRF header is added by
+   * `request()`; the write is Zod-validated by the BFF (unknown widget id / oversized / bad
+   * geometry → 400).
+   */
+  putDashboardLayout: (layout: DashboardLayout) =>
+    request<DashboardLayout>('/api/v1/dashboard/layout', {
+      method: 'PUT',
+      body: JSON.stringify(layout)
+    }).then((r) => r.data),
+
+  /** Reset the caller's dashboard layout to the server default (ADR 0010). */
+  resetDashboardLayout: () =>
+    request<DashboardLayout>('/api/v1/dashboard/layout', { method: 'DELETE' }).then((r) => r.data),
+
+  /** Device eventlog / syslog (N2). syslog is honestly empty at POC. Returns data + meta. */
+  getDeviceEvents: (id: string, source: DeviceEventSource = 'eventlog', query = '') => {
+    const qs = new URLSearchParams({ source, ...(query ? Object.fromEntries(new URLSearchParams(query)) : {}) });
+    return request<readonly (EventLogEntry | SyslogEntry)[]>(
+      `/api/v1/devices/${encodeURIComponent(id)}/events?${qs.toString()}`
+    );
+  }
 };
 
 /** The login endpoint is a top-level navigation, not a fetch (it 302s to Keycloak). */

@@ -36,6 +36,15 @@ describe('AppHeader admin-portal nav link (FR-40/42)', () => {
     expect(screen.queryByRole('button', { name: /open admin portal/i })).not.toBeInTheDocument();
   });
 
+  it('exposes the Phase 3 primary nav (Alarms, Links) and the Dashboards group', () => {
+    render(<AppHeader session={makeSession()} />);
+    expect(screen.getByRole('link', { name: 'Alarms' })).toHaveAttribute('href', '/alarms');
+    expect(screen.getByRole('link', { name: 'Links' })).toHaveAttribute('href', '/links');
+    expect(screen.getByText('Dashboards')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Capacity' })).toHaveAttribute('href', '/dashboards/capacity');
+    expect(screen.getByRole('link', { name: 'Fleet trends' })).toHaveAttribute('href', '/dashboards/fleet-trends');
+  });
+
   it('opens the BFF-provided URL in a new tab (same target the in-body button used)', async () => {
     const spy = vi
       .spyOn(bffClient, 'getAdminPortalUrl')

@@ -13,6 +13,8 @@ import { createRequireSession } from './http/middleware/auth.js';
 import { createAuthRouter, createRefreshIfNeeded } from './http/routes/auth.js';
 import { createDeviceRouter } from './http/routes/devices.js';
 import { createAlarmRouter } from './http/routes/alarms.js';
+import { createDashboardLayoutRouter } from './http/routes/dashboardLayout.js';
+import { createLayoutStore } from './dashboard/layoutStore.js';
 import { BFF_VERSION } from './version.js';
 
 import { readFileSync } from 'node:fs';
@@ -57,10 +59,15 @@ const requireSession = createRequireSession({
 });
 
 /**
- * FR-16 provisioning. On this POC the LibreNMS native UI auto-provisions via its `sso` header
- * mechanism (ADR 0003 F-5 amendment), so the BFF's own login does not need to create the native
- * user through the API. We log the intended level for traceability and resolve; a real users-API
- * write lands when Task 6/7 confirm the mechanism. Never patches LibreNMS core (FR-07).
+ * FR-16 — CLOSED, satisfied by LibreNMS's own SSO auto-provisioning + per-login role sync.
+ * Verified against real LibreNMS 25.7.0 source (design `nms-custdash-fr16.md` §2): the `sso`
+ * mechanism `firstOrNew`+`save`s the native user on first login (`create_users`) AND re-syncs the
+ * level from the group→level map on EVERY login (`SSOAuthorizer::getRoles` → `syncRoles` in
+ * `LegacyUserProvider::retrieveByCredentials`). There is NO supported user-management REST API in
+ * `routes/api.php`, so a BFF-side write would have no endpoint and could only drift or conflict
+ * with `syncRoles`. We keep this as an honestly-documented no-op that logs the intended level for
+ * traceability; it never patches LibreNMS core (FR-07). If a future non-SSO IdP path is added,
+ * FR-16 re-opens as a new work item — not this one.
  */
 const ensureUser = async (username: string, level: number): Promise<void> => {
   logger.info('login provisioning (native sso mechanism handles native user)', { username, level });
@@ -100,6 +107,17 @@ const alarmRouter = createAlarmRouter({
 });
 
 /**
+ * Per-user dashboard layout store (ADR 0010). Reuses the BFF's existing Redis client; the layout
+ * key is derived from the session subject server-side, so no cross-user layout access is possible.
+ */
+const layouts = createLayoutStore(redis);
+const dashboardLayoutRouter = createDashboardLayoutRouter({
+  layouts,
+  logger,
+  requireSession
+});
+
+/**
  * `/ready` now performs REAL dependency probes for Redis (session store, PING), LibreNMS
  * (reachable + authenticated), the InfluxDB v2 TSDB (reachable), AND the IdP (the `nms` realm
  * discovery document + JWKS are fetchable). No probe is a stub — an unverified dependency reports
@@ -108,7 +126,7 @@ const alarmRouter = createAlarmRouter({
 const app = createApp({
   logger,
   version: BFF_VERSION,
-  routers: [deviceRouter, alarmRouter],
+  routers: [deviceRouter, alarmRouter, dashboardLayoutRouter],
   rootRouters: [authRouter],
   healthChecks: createHealthChecks({ redis, librenms, metrics, oidc }),
   isProduction: config.nodeEnv === 'production'

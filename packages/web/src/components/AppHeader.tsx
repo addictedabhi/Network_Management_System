@@ -54,7 +54,20 @@ export function AppHeader({ session }: AppHeaderProps) {
       </div>
       <nav className="app-header__nav" aria-label="Primary">
         <Link href="/devices">Inventory</Link>
-        <Link href="/dashboard">Dashboard</Link>
+        <Link href="/alarms">Alarms</Link>
+        <Link href="/links">Links</Link>
+        {/* Dashboards group — a native <details> disclosure keeps the top-nav uncluttered while
+            exposing the curated dashboard set. No JS/inline handler → no CSP relaxation. */}
+        <details className="nav-group">
+          <summary className="nav-group__summary">Dashboards</summary>
+          <div className="nav-group__menu">
+            <Link href="/dashboards/custom">My Dashboard</Link>
+            <Link href="/dashboard">Operational</Link>
+            <Link href="/dashboards/capacity">Capacity</Link>
+            <Link href="/dashboards/top-talkers">Top talkers</Link>
+            <Link href="/dashboards/fleet-trends">Fleet trends</Link>
+          </div>
+        </details>
       </nav>
       <div className="app-header__user">
         {session ? (

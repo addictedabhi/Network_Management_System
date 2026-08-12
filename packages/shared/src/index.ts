@@ -8,3 +8,5 @@ export * from './types/metric.js';
 export * from './types/alarm.js';
 export * from './types/device.js';
 export * from './types/session.js';
+export * from './types/log.js';
+export * from './types/dashboardLayout.js';
